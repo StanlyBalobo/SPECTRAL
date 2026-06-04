@@ -45,7 +45,7 @@ if choice == "1":
             port = random_port()
 
             print(f"\033[91mhttps://{ip}:{port}\033[0m")
-            time.sleep(1)
+            time.sleep(0.5)
 
     except KeyboardInterrupt:
         print("\n\nScanner stopped by user.")
