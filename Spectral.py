@@ -19,36 +19,33 @@ def banner():
         | |
         |_|
 
-      Spectral v1.0
-      CCTV Simulation Terminal
+        Spectral v1.0
+   CCTV Simulation Terminal
 """)
 
-while True:
-    os.system("cls" if os.name == "nt" else "clear")
-    banner()
+os.system("cls" if os.name == "nt" else "clear")
+banner()
 
-    print("[1] Begin Scan")
-    print("[0] Exit")
+print("[1] Begin Scan")
+print("[0] Exit")
 
-    choice = input("\nSelect: ")
+choice = input("\nSelect: ")
 
-    if choice == "0":
-        print("\nExiting Spectral...")
-        break
+if choice == "0":
+    print("Exiting Spectral...")
+    exit()
 
-    elif choice == "1":
-        print("\n\033[91m[!] Initializing Spectral...\033[0m")
-        time.sleep(1)
+if choice == "1":
+    print("\n\033[91m[!] Spectral Scanner Started\033[0m")
+    print("\033[91mPress Ctrl+C to stop.\033[0m\n")
 
-        for i in range(5):
+    try:
+        while True:
             ip = random_ip()
             port = random_port()
 
             print(f"\033[91mhttps://{ip}:{port}\033[0m")
-            time.sleep(0.8)
+            time.sleep(1)
 
-        input("\nPress Enter to return to menu...")
-
-    else:
-        print("Invalid choice.")
-        time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n\nScanner stopped by user.")
