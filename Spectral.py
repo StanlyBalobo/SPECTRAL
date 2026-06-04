@@ -558,4 +558,4 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
         if attempts - last_save >= 100000:
             last_save = attempts
             try:
-                with open()
+                with open():
