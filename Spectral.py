@@ -1,53 +1,80 @@
 #!/usr/bin/env python3
 
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
+import os
+import subprocess
 import time
-import requests
 
-HOST = "127.0.0.1"
-PORT = 8000
+# ANSI Colors
+RED = "\033[91m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+MAGENTA = "\033[95m"
+CYAN = "\033[96m"
+WHITE = "\033[97m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
 
-class TestSite(BaseHTTPRequestHandler):
-    def do_GET(self):
-        page = """
-        <html>
-        <head><title>Test Site</title></head>
-        <body>
-            <h1>Local Test Website</h1>
-            <p>Running for performance testing.</p>
-        </body>
-        </html>
-        """
+def clear():
+    os.system("clear")
 
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.end_headers()
-        self.wfile.write(page.encode())
+def banner():
+    print(f"""{CYAN}{BOLD}
+████████╗██████╗  █████╗  ██████╗███████╗
+╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝
+   ██║   ██████╔╝███████║██║     █████╗
+   ██║   ██╔══██╗██╔══██║██║     ██╔══╝
+   ██║   ██║  ██║██║  ██║╚██████╗███████╗
+   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝
+{RESET}""")
 
-def start_server():
-    server = HTTPServer((HOST, PORT), TestSite)
-    print(f"[+] Website running at http://{HOST}:{PORT}")
-    server.serve_forever()
+    print(f"{MAGENTA}{'='*50}{RESET}")
+    print(f"{GREEN}{BOLD}           TRACE ROUTE TOOL{RESET}")
+    print(f"{MAGENTA}{'='*50}{RESET}")
+    print(f"{WHITE}Target : {YELLOW}google.com{RESET}")
+    print()
 
-threading.Thread(target=start_server, daemon=True).start()
+clear()
+banner()
 
-time.sleep(1)
+input(f"{CYAN}[>] Press {GREEN}ENTER{CYAN} to start tracing...{RESET}")
 
-print("\nMonitoring response time...\n")
+print()
+print(f"{GREEN}[+] Initializing...{RESET}")
+time.sleep(0.5)
 
-while True:
-    try:
-        start = time.perf_counter()
-        r = requests.get(f"http://{HOST}:{PORT}", timeout=5)
-        latency = (time.perf_counter() - start) * 1000
+print(f"{GREEN}[+] Resolving Host...{RESET}")
+time.sleep(0.5)
 
-        print(
-            f"Status: {r.status_code} | "
-            f"Response Time: {latency:.2f} ms"
-        )
+print(f"{GREEN}[+] Starting Trace...{RESET}")
+print()
 
-    except Exception as e:
-        print("Error:", e)
+try:
+    subprocess.run(
+        [
+            "traceroute",
+            "-m", "15",     # Max hops
+            "-w", "1",      # 1 second timeout per hop
+            "google.com"
+        ],
+        timeout=20
+    )
 
-    time.sleep(2)
+except FileNotFoundError:
+    print(f"{RED}[!] traceroute is not installed!{RESET}")
+    print(f"{YELLOW}Run:{RESET} pkg install traceroute")
+
+except subprocess.TimeoutExpired:
+    print()
+    print(f"{RED}[!] Trace timed out after 20 seconds.{RESET}")
+
+except KeyboardInterrupt:
+    print()
+    print(f"{YELLOW}[!] Trace cancelled by user.{RESET}")
+
+except Exception as e:
+    print(f"{RED}[!] Error: {e}{RESET}")
+
+print()
+print(f"{GREEN}[✓] Finished!{RESET}")
+input(f"{CYAN}Press {GREEN}ENTER{CYAN} to exit...{RESET}")
