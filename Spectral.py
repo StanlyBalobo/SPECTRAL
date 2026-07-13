@@ -8,9 +8,8 @@ import time
 RED = "\033[91m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
-BLUE = "\033[94m"
-MAGENTA = "\033[95m"
 CYAN = "\033[96m"
+MAGENTA = "\033[95m"
 WHITE = "\033[97m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -29,7 +28,7 @@ def banner():
 {RESET}""")
 
     print(f"{MAGENTA}{'='*50}{RESET}")
-    print(f"{GREEN}{BOLD}           TRACE ROUTE TOOL{RESET}")
+    print(f"{GREEN}{BOLD}        TRACE ROUTE LOOP TOOL{RESET}")
     print(f"{MAGENTA}{'='*50}{RESET}")
     print(f"{WHITE}Target : {YELLOW}google.com{RESET}")
     print()
@@ -37,44 +36,27 @@ def banner():
 clear()
 banner()
 
-input(f"{CYAN}[>] Press {GREEN}ENTER{CYAN} to start tracing...{RESET}")
+input(f"{CYAN}[>] Press {GREEN}ENTER{CYAN} to start...{RESET}")
 
-print()
-print(f"{GREEN}[+] Initializing...{RESET}")
-time.sleep(0.5)
-
-print(f"{GREEN}[+] Resolving Host...{RESET}")
-time.sleep(0.5)
-
-print(f"{GREEN}[+] Starting Trace...{RESET}")
-print()
+count = 1
 
 try:
-    subprocess.run(
-        [
+    while True:
+        print(f"\n{GREEN}[+] Trace #{count}{RESET}")
+        print(f"{YELLOW}{'-'*50}{RESET}")
+
+        subprocess.run([
             "traceroute",
-            "-m", "15",     # Max hops
-            "-w", "1",      # 1 second timeout per hop
+            "-m", "15",
+            "-w", "1",
             "google.com"
-        ],
-        timeout=20
-    )
+        ])
 
-except FileNotFoundError:
-    print(f"{RED}[!] traceroute is not installed!{RESET}")
-    print(f"{YELLOW}Run:{RESET} pkg install traceroute")
+        print(f"{GREEN}[✓] Trace #{count} complete.{RESET}")
+        print(f"{CYAN}Restarting in 2 seconds... (Press Ctrl+C to stop){RESET}")
 
-except subprocess.TimeoutExpired:
-    print()
-    print(f"{RED}[!] Trace timed out after 20 seconds.{RESET}")
+        count += 1
+        time.sleep(2)
 
 except KeyboardInterrupt:
-    print()
-    print(f"{YELLOW}[!] Trace cancelled by user.{RESET}")
-
-except Exception as e:
-    print(f"{RED}[!] Error: {e}{RESET}")
-
-print()
-print(f"{GREEN}[✓] Finished!{RESET}")
-input(f"{CYAN}Press {GREEN}ENTER{CYAN} to exit...{RESET}")
+    print(f"\n\n{RED}[!] Program stopped by user (Ctrl+C).{RESET}")
