@@ -49,21 +49,43 @@ banner() {
 
 validate_phone() {
     local phone="$1"
-    # Strip any non-digit characters
+    
+    # Strip everything except digits
     phone=$(echo "$phone" | tr -cd '0-9')
     
-    # Check if it's a valid +63 number
-    if [[ "${#phone}" -eq 10 ]] && [[ "$phone" =~ ^9[0-9]{9}$ ]]; then
+    # PHILIPPINE MOBILE NUMBER NORMALIZATION:
+    # Valid PH mobile numbers are: 639XXXXXXXXX (12 digits)
+    # The 9 after 63 is the network prefix start, it MUST be preserved.
+    
+    local len=${#phone}
+    
+    # Case 1: 0917XXXXXXX (11 digits) -> 63917XXXXXXX
+    if [[ "$len" -eq 11 ]] && [[ "$phone" =~ ^09[0-9]{9}$ ]]; then
+        # Drop the leading 0, prepend 63 -> 63 + 917XXXXXXX = 63917XXXXXXX ✓
         echo "63${phone:1}"
-    elif [[ "${#phone}" -eq 11 ]] && [[ "$phone" =~ ^09[0-9]{9}$ ]]; then
-        echo "63${phone:2}"
-    elif [[ "${#phone}" -eq 12 ]] && [[ "$phone" =~ ^639[0-9]{9}$ ]]; then
-        echo "$phone"
-    elif [[ "${#phone}" -eq 13 ]] && [[ "$phone" =~ ^\+639[0-9]{9}$ ]]; then
-        echo "${phone:1}"
-    else
-        echo "INVALID"
+        return
     fi
+    
+    # Case 2: +63917XXXXXXX (13 chars, stripped -> 63917XXXXXXX = 12 digits)
+    if [[ "$len" -eq 12 ]] && [[ "$phone" =~ ^639[0-9]{9}$ ]]; then
+        echo "$phone"
+        return
+    fi
+    
+    # Case 3: 917XXXXXXX (10 digits) -> 63917XXXXXXX
+    if [[ "$len" -eq 10 ]] && [[ "$phone" =~ ^9[0-9]{9}$ ]]; then
+        echo "63${phone}"
+        return
+    fi
+    
+    # Case 4: 63917XXXXXXX (12 digits) -> 63917XXXXXXX
+    if [[ "$len" -eq 12 ]] && [[ "$phone" =~ ^639[0-9]{9}$ ]]; then
+        echo "$phone"
+        return
+    fi
+    
+    # Invalid
+    echo "INVALID"
 }
 
 send_sms_textbelt() {
@@ -159,6 +181,16 @@ if ! command -v curl &> /dev/null; then
     exit 1
 fi
 
+# --- Check for bc (needed for float delay comparison) ---
+if ! command -v bc &> /dev/null; then
+    echo -e "\e[1;33m[!] WARNING: bc not found. Installing...\e[0m"
+    sudo apt install bc -y 2>/dev/null || {
+        echo -e "\e[1;31m[!] Could not install bc. Delay will be rounded to integers.\e[0m"
+        # Fallback: we'll skip the bc check and just use integer sleep
+        USE_BC=false
+    }
+fi
+
 # --- Get phone number ---
 echo -e "\e[1;36m[>]\e[0m Target phone number (+63 Philippines)"
 read -p "  Phone: " RAW_PHONE
@@ -166,7 +198,11 @@ read -p "  Phone: " RAW_PHONE
 PHONE=$(validate_phone "$RAW_PHONE")
 if [[ "$PHONE" == "INVALID" ]]; then
     echo -e "\e[1;31m[!] ERROR: Invalid phone number format.\e[0m"
-    echo "    Accepted formats: 09171234567 | +639171234567 | 639171234567"
+    echo "    Accepted formats:"
+    echo "      0917XXXXXXX  (11 digits)"
+    echo "      +63917XXXXXXX  (13 chars)"
+    echo "      63917XXXXXXX (12 digits)"
+    echo "      917XXXXXXX   (10 digits)"
     exit 1
 fi
 echo -e "  Normalized: \e[1;33m+$PHONE\e[0m"
@@ -194,9 +230,17 @@ echo ""
 echo -e "\e[1;36m[>]\e[0m Delay between each SMS (in seconds)"
 echo "    (use decimals for sub-second, e.g. 0.5)"
 read -p "  Delay: " DELAY
-if ! [[ "$DELAY" =~ ^[0-9]+\.?[0-9]*$ ]] || (( $(echo "$DELAY <= 0" | bc -l) )); then
-    echo -e "\e[1;31m[!] ERROR: Enter a valid positive number.\e[0m"
-    exit 1
+if [[ "$USE_BC" != "false" ]]; then
+    if ! [[ "$DELAY" =~ ^[0-9]+\.?[0-9]*$ ]] || (( $(echo "$DELAY <= 0" | bc -l) )); then
+        echo -e "\e[1;31m[!] ERROR: Enter a valid positive number.\e[0m"
+        exit 1
+    fi
+else
+    # Without bc, just check if it's a positive number (integer)
+    if ! [[ "$DELAY" =~ ^[0-9]+$ ]] || [[ "$DELAY" -lt 1 ]]; then
+        echo -e "\e[1;31m[!] ERROR: Enter a valid positive integer.\e[0m"
+        exit 1
+    fi
 fi
 echo ""
 
