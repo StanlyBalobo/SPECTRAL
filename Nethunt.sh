@@ -8,31 +8,22 @@
 # ╚══════╝╚═╝     ╚═╝╚══════╝    ╚══════╝╚══════╝╚═╝  ╚═══╝╚═════╝ 
 #                                                                    
 #  SMS Blaster - Authorized Penetration Testing Tool
-#  [+] Target: +63 (Philippines) numbers
-#  [+] Features: Bulk send, delay control, count control
-#  [+] Usage:  chmod +x sms_blaster.sh && ./sms_blaster.sh
+#  [+] No API keys  |  No paid services  |  Fully offline
+#  [+] Requires: USB GSM modem + active SIM card
+#  [+] Backends: GAMMU (preferred) | MMCLI (fallback)
 #
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
-# --- Choose your SMS gateway ---
-# "textbelt"  = Textbelt (free: 1 SMS/day, paid: unlimited) 
-# "twilio"    = Twilio (requires ACCOUNT SID & AUTH TOKEN)
-# "custom"    = Custom HTTP endpoint
-GATEWAY="textbelt"
+# Leave these blank for auto-detect, or force one:
+#   "gammu"  -> uses gammu + USB modem
+#   "mmcli"  -> uses ModemManager (mmcli)
+#   "auto"   -> auto-detect which is available
+BACKEND="auto"
 
-# --- Twilio credentials (only needed if GATEWAY="twilio") ---
-TWILIO_SID=""
-TWILIO_TOKEN=""
-TWILIO_FROM=""          # Your Twilio phone number (e.g., +18551234567)
-
-# --- Custom gateway (only needed if GATEWAY="custom") ---
-CUSTOM_URL=""
-CUSTOM_METHOD="POST"    # POST or GET
-CUSTOM_PHONE_PARAM="phone"
-CUSTOM_MSG_PARAM="message"
-CUSTOM_HEADER=""        # e.g. "Authorization: Bearer YOUR_TOKEN"
+# If your modem needs a PIN, set it here (leave blank if no PIN)
+SIM_PIN=""
 
 # ============================================================
 # FUNCTIONS
@@ -41,7 +32,7 @@ CUSTOM_HEADER=""        # e.g. "Authorization: Bearer YOUR_TOKEN"
 banner() {
     echo -e "\e[1;31m"
     echo "╔══════════════════════════════════════════════════════╗"
-    echo "║        SMS BLASTER - Bulk SMS Sender Tool           ║"
+    echo "║        SMS BLASTER - Offline GSM Modem Tool         ║"
     echo "║      For Authorized Penetration Testing Only        ║"
     echo "╚══════════════════════════════════════════════════════╝"
     echo -e "\e[0m"
@@ -49,123 +40,150 @@ banner() {
 
 validate_phone() {
     local phone="$1"
-    
-    # Strip everything except digits
     phone=$(echo "$phone" | tr -cd '0-9')
-    
-    # PHILIPPINE MOBILE NUMBER NORMALIZATION:
-    # Valid PH mobile numbers are: 639XXXXXXXXX (12 digits)
-    # The 9 after 63 is the network prefix start, it MUST be preserved.
-    
+
     local len=${#phone}
-    
-    # Case 1: 0917XXXXXXX (11 digits) -> 63917XXXXXXX
+
+    # 0917XXXXXXX (11 digits) -> 63917XXXXXXX
     if [[ "$len" -eq 11 ]] && [[ "$phone" =~ ^09[0-9]{9}$ ]]; then
-        # Drop the leading 0, prepend 63 -> 63 + 917XXXXXXX = 63917XXXXXXX ✓
         echo "63${phone:1}"
         return
     fi
-    
-    # Case 2: +63917XXXXXXX (13 chars, stripped -> 63917XXXXXXX = 12 digits)
+
+    # +63917XXXXXXX stripped -> 63917XXXXXXX (12 digits)
     if [[ "$len" -eq 12 ]] && [[ "$phone" =~ ^639[0-9]{9}$ ]]; then
         echo "$phone"
         return
     fi
-    
-    # Case 3: 917XXXXXXX (10 digits) -> 63917XXXXXXX
+
+    # 917XXXXXXX (10 digits) -> 63917XXXXXXX
     if [[ "$len" -eq 10 ]] && [[ "$phone" =~ ^9[0-9]{9}$ ]]; then
         echo "63${phone}"
         return
     fi
-    
-    # Case 4: 63917XXXXXXX (12 digits) -> 63917XXXXXXX
-    if [[ "$len" -eq 12 ]] && [[ "$phone" =~ ^639[0-9]{9}$ ]]; then
-        echo "$phone"
-        return
-    fi
-    
-    # Invalid
+
     echo "INVALID"
 }
 
-send_sms_textbelt() {
-    local phone="$1"
-    local message="$2"
-    
-    response=$(curl -s -X POST https://textbelt.com/text \
-        --data-urlencode "phone=$phone" \
-        --data-urlencode "message=$message" \
-        -d key=textbelt)
-    
-    echo "$response"
-}
-
-send_sms_twilio() {
-    local phone="$1"
-    local message="$2"
-    
-    response=$(curl -s -X POST "https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages" \
-        --data-urlencode "Body=$message" \
-        --data-urlencode "From=$TWILIO_FROM" \
-        --data-urlencode "To=$phone" \
-        -u "$TWILIO_SID:$TWILIO_TOKEN")
-    
-    echo "$response"
-}
-
-send_sms_custom() {
-    local phone="$1"
-    local message="$2"
-    
-    if [[ "$CUSTOM_METHOD" == "GET" ]]; then
-        response=$(curl -s -G "$CUSTOM_URL" \
-            --data-urlencode "$CUSTOM_PHONE_PARAM=$phone" \
-            --data-urlencode "$CUSTOM_MSG_PARAM=$message" \
-            -H "$CUSTOM_HEADER")
-    else
-        response=$(curl -s -X POST "$CUSTOM_URL" \
-            --data-urlencode "$CUSTOM_PHONE_PARAM=$phone" \
-            --data-urlencode "$CUSTOM_MSG_PARAM=$message" \
-            -H "$CUSTOM_HEADER")
+# --- Detect backend ---
+detect_backend() {
+    if [[ "$BACKEND" != "auto" ]]; then
+        echo "$BACKEND"
+        return
     fi
-    
-    echo "$response"
+
+    if command -v gammu &> /dev/null; then
+        echo "gammu"
+    elif command -v mmcli &> /dev/null; then
+        echo "mmcli"
+    else
+        echo "NONE"
+    fi
 }
 
+# --- Check gammu modem ---
+check_gammu() {
+    local output
+    output=$(gammu identify 2>&1)
+    if echo "$output" | grep -qi "Unknown" || echo "$output" | grep -qi "error\|Error\|FAIL\|not found"; then
+        echo "FAILED"
+    else
+        echo "$output"
+    fi
+}
+
+# --- Check mmcli modem ---
+check_mmcli() {
+    local modems
+    modems=$(mmcli -L 2>&1)
+    if echo "$modems" | grep -qi "No modems\|not found\|error"; then
+        echo "FAILED"
+    else
+        # Extract first modem ID
+        local modem_id
+        modem_id=$(echo "$modems" | grep -oP '/org/freedesktop/ModemManager1/Modem/\K[0-9]+' | head -1)
+        echo "$modem_id"
+    fi
+}
+
+# --- Send via gammu ---
+send_gammu() {
+    local phone="$1"
+    local message="$2"
+
+    # gammu sendsms needs the number with + prefix for international
+    echo "$message" | sudo gammu sendsms TEXT "+$phone" -unicode -report 2>&1
+}
+
+# --- Send via mmcli ---
+send_mmcli() {
+    local phone="$1"
+    local message="$2"
+    local modem_id="$3"
+
+    # Create the SMS
+    local create_out
+    create_out=$(sudo mmcli -m "$modem_id" --messaging-create-sms="text='$message',number='+$phone'" 2>&1)
+    
+    # Extract SMS path
+    local sms_path
+    sms_path=$(echo "$create_out" | grep -oP '/org/freedesktop/ModemManager1/SMS/[0-9]+')
+    
+    if [[ -z "$sms_path" ]]; then
+        echo "FAILED to create SMS: $create_out"
+        return 1
+    fi
+
+    # Send the SMS
+    local send_out
+    send_out=$(sudo mmcli -s "$sms_path" --send 2>&1)
+    
+    # Delete the SMS from modem storage
+    sudo mmcli -m "$modem_id" --messaging-delete-sms="$sms_path" &> /dev/null
+
+    if echo "$send_out" | grep -qi "successfully sent"; then
+        echo "SUCCESS"
+    else
+        echo "FAILED: $send_out"
+    fi
+}
+
+# --- Send wrapper ---
 send_sms() {
     local phone="$1"
     local message="$2"
     local count="$3"
     local total="$4"
-    
-    case "$GATEWAY" in
-        textbelt)
-            result=$(send_sms_textbelt "$phone" "$message")
-            ;;
-        twilio)
-            result=$(send_sms_twilio "$phone" "$message")
-            ;;
-        custom)
-            result=$(send_sms_custom "$phone" "$message")
-            ;;
-        *)
-            echo "ERROR: Unknown gateway '$GATEWAY'"
+    local backend="$5"
+    local modem_id="$6"
+
+    local result
+    local status="?"
+
+    if [[ "$backend" == "gammu" ]]; then
+        result=$(send_gammu "$phone" "$message")
+        if echo "$result" | grep -qi "OK\|reference="; then
+            status="✓"
+            return 0
+        else
+            status="✗"
+            echo "$result"
             return 1
-            ;;
-    esac
-    
-    # Parse result
-    local success=$(echo "$result" | grep -o '"success":[^,}]*' | grep -o '[a-z]*$')
-    local sms_id=$(echo "$result" | grep -o '"id":[^,}]*' | grep -o '[0-9]*')
-    
-    if [[ "$success" == "true" ]]; then
-        echo -e "\e[1;32m[✓]\e[0m SMS $count/$total sent | ID: $sms_id"
-        return 0
-    else
-        local error=$(echo "$result" | grep -o '"error":[^,}]*' | sed 's/"error"://' | sed 's/"//g')
-        echo -e "\e[1;31m[✗]\e[0m SMS $count/$total FAILED | Reason: ${error:-Unknown}"
-        return 1
+        fi
+    elif [[ "$backend" == "mmcli" ]]; then
+        result=$(send_mmcli "$phone" "$message" "$modem_id")
+        if [[ "$result" == "SUCCESS" ]]; then
+            status="✓"
+            return 0
+        else
+            status="✗"
+            echo "$result"
+            return 1
+        fi
     fi
+
+    echo -e "\e[1;${color}m[${status}]\e[0m SMS $count/$total"
+    echo "$result"
 }
 
 # ============================================================
@@ -174,35 +192,83 @@ send_sms() {
 
 banner
 
-# --- Check prerequisites ---
+# --- Prerequisites ---
 if ! command -v curl &> /dev/null; then
-    echo -e "\e[1;31m[!] ERROR: curl is not installed.\e[0m"
-    echo "    Install it: sudo apt install curl -y"
+    echo -e "\e[1;33m[!] Note: curl not installed (only needed for API gateways, not for GSM modem mode)\e[0m"
+fi
+
+if ! command -v sudo &> /dev/null; then
+    echo -e "\e[1;31m[!] ERROR: sudo is required.\e[0m"
     exit 1
 fi
 
-# --- Check for bc (needed for float delay comparison) ---
-if ! command -v bc &> /dev/null; then
-    echo -e "\e[1;33m[!] WARNING: bc not found. Installing...\e[0m"
-    sudo apt install bc -y 2>/dev/null || {
-        echo -e "\e[1;31m[!] Could not install bc. Delay will be rounded to integers.\e[0m"
-        # Fallback: we'll skip the bc check and just use integer sleep
-        USE_BC=false
-    }
+# --- Detect backend ---
+BACKEND=$(detect_backend)
+if [[ "$BACKEND" == "NONE" ]]; then
+    echo -e "\e[1;31m[!] ERROR: No GSM modem tool found.\e[0m"
+    echo ""
+    echo "    Install one of the following:"
+    echo ""
+    echo "    Option A: Gammu (recommended)"
+    echo "      sudo apt update && sudo apt install gammu -y"
+    echo "      Then configure: sudo gammu-config"
+    echo "      (Set port: /dev/ttyUSB0, Connection: at19200)"
+    echo ""
+    echo "    Option B: ModemManager + mmcli"
+    echo "      sudo apt install modemmanager mmcli -y"
+    echo ""
+    echo "    Then plug in your USB GSM modem and run this script again."
+    exit 1
 fi
 
+echo -e "\e[1;33m[+] Backend detected: $BACKEND\e[0m"
+
+# --- Verify modem ---
+MODEM_ID=""
+if [[ "$BACKEND" == "gammu" ]]; then
+    echo -e "\e[1;36m[*] Checking gammu modem...\e[0m"
+    gammu_check=$(check_gammu)
+    if [[ "$gammu_check" == "FAILED" ]]; then
+        echo -e "\e[1;31m[!] ERROR: gammu identify failed."
+        echo "    Run 'sudo gammu-config' to set up your modem."
+        echo "    Then run 'gammu identify' to test.\e[0m"
+        exit 1
+    fi
+    echo -e "\e[1;32m[✓] Modem detected:\e[0m"
+    echo "$gammu_check" | head -5
+elif [[ "$BACKEND" == "mmcli" ]]; then
+    echo -e "\e[1;36m[*] Checking mmcli modems...\e[0m"
+    MODEM_ID=$(check_mmcli)
+    if [[ "$MODEM_ID" == "FAILED" ]]; then
+        echo -e "\e[1;31m[!] ERROR: No modem found via mmcli.\e[0m"
+        echo "    Plug in your GSM modem and check: mmcli -L"
+        echo "    If modem is listed but disabled: sudo mmcli -m 0 -e"
+        exit 1
+    fi
+    echo -e "\e[1;32m[✓] Modem found: ID $MODEM_ID\e[0m"
+    
+    # Enable modem if needed
+    modem_status=$(sudo mmcli -m "$MODEM_ID" --command "AT+CPIN?")
+    if echo "$modem_status" | grep -qi "error\|SIM PIN"; then
+        if [[ -n "$SIM_PIN" ]]; then
+            echo -e "\e[1;33m[!] Unlocking SIM with PIN...\e[0m"
+            sudo mmcli -m "$MODEM_ID" --pin "$SIM_PIN"
+        else
+            echo -e "\e[1;33m[!] SIM may be PIN-locked. Set SIM_PIN in the script.\e[0m"
+        fi
+    fi
+fi
+
+echo ""
+
 # --- Get phone number ---
-echo -e "\e[1;36m[>]\e[0m Target phone number (+63 Philippines)"
+echo -e "\e[1;36m[>]\e[0m Target +63 phone number"
 read -p "  Phone: " RAW_PHONE
 
 PHONE=$(validate_phone "$RAW_PHONE")
 if [[ "$PHONE" == "INVALID" ]]; then
-    echo -e "\e[1;31m[!] ERROR: Invalid phone number format.\e[0m"
-    echo "    Accepted formats:"
-    echo "      0917XXXXXXX  (11 digits)"
-    echo "      +63917XXXXXXX  (13 chars)"
-    echo "      63917XXXXXXX (12 digits)"
-    echo "      917XXXXXXX   (10 digits)"
+    echo -e "\e[1;31m[!] ERROR: Invalid phone number."
+    echo "    Formats: 0917XXXXXXX | +63917XXXXXXX | 63917XXXXXXX | 917XXXXXXX\e[0m"
     exit 1
 fi
 echo -e "  Normalized: \e[1;33m+$PHONE\e[0m"
@@ -228,19 +294,11 @@ echo ""
 
 # --- Get delay ---
 echo -e "\e[1;36m[>]\e[0m Delay between each SMS (in seconds)"
-echo "    (use decimals for sub-second, e.g. 0.5)"
+echo "    (use decimals like 0.5 for sub-second)"
 read -p "  Delay: " DELAY
-if [[ "$USE_BC" != "false" ]]; then
-    if ! [[ "$DELAY" =~ ^[0-9]+\.?[0-9]*$ ]] || (( $(echo "$DELAY <= 0" | bc -l) )); then
-        echo -e "\e[1;31m[!] ERROR: Enter a valid positive number.\e[0m"
-        exit 1
-    fi
-else
-    # Without bc, just check if it's a positive number (integer)
-    if ! [[ "$DELAY" =~ ^[0-9]+$ ]] || [[ "$DELAY" -lt 1 ]]; then
-        echo -e "\e[1;31m[!] ERROR: Enter a valid positive integer.\e[0m"
-        exit 1
-    fi
+if ! [[ "$DELAY" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+    echo -e "\e[1;31m[!] ERROR: Enter a valid number.\e[0m"
+    exit 1
 fi
 echo ""
 
@@ -248,10 +306,10 @@ echo ""
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║                    JOB SUMMARY                       ║"
 echo "╠══════════════════════════════════════════════════════╣"
-echo "║  Gateway   : $(printf '%-36s' "$GATEWAY")║"
+echo "║  Backend   : $(printf '%-36s' "$BACKEND")║"
 echo "║  Target    : +$(printf '%-36s' "$PHONE")║"
 echo "║  Message   : $(printf '%-36s' "${MESSAGE:0:50}")║"
-echo "║  Count     : $(printf '%-36s' "$COUNT")║"
+echo "║  SMS Count : $(printf '%-36s' "$COUNT")║"
 echo "║  Delay     : $(printf '%-36s' "${DELAY}s")║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
@@ -263,22 +321,25 @@ if [[ "$CONFIRM" != "y" ]] && [[ "$CONFIRM" != "Y" ]]; then
 fi
 echo ""
 
-# --- Send loop ---
-echo -e "\e[1;35m[*] Firing SMS...\e[0m"
+# --- Sending loop ---
+echo -e "\e[1;35m[*] Sending SMS via modem...\e[0m"
 echo ""
 
-SUCCESS_COUNT=0
-FAIL_COUNT=0
+SUCCESS=0
+FAIL=0
 START_TIME=$(date +%s)
 
 for ((i = 1; i <= COUNT; i++)); do
-    send_sms "$PHONE" "$MESSAGE" "$i" "$COUNT"
-    if [[ $? -eq 0 ]]; then
-        ((SUCCESS_COUNT++))
-    else
-        ((FAIL_COUNT++))
-    fi
+    echo -ne "\e[1;34m[→]\e[0m Sending $i/$COUNT... "
     
+    if send_sms "$PHONE" "$MESSAGE" "$i" "$COUNT" "$BACKEND" "$MODEM_ID" 2>/dev/null; then
+        echo -e "\e[1;32m✓\e[0m"
+        ((SUCCESS++))
+    else
+        echo -e "\e[1;31m✗\e[0m"
+        ((FAIL++))
+    fi
+
     if [[ $i -lt $COUNT ]]; then
         sleep "$DELAY"
     fi
@@ -291,8 +352,8 @@ echo ""
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║                    RESULTS                           ║"
 echo "╠══════════════════════════════════════════════════════╣"
-echo "║  Sent     : $(printf '%-36s' "$SUCCESS_COUNT/$COUNT")║"
-echo "║  Failed   : $(printf '%-36s' "$FAIL_COUNT")║"
+echo "║  Sent     : $(printf '%-36s' "$SUCCESS/$COUNT")║"
+echo "║  Failed   : $(printf '%-36s' "$FAIL")║"
 echo "║  Duration : $(printf '%-36s' "${TOTAL_TIME}s")║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
